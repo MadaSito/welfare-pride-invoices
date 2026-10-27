@@ -1,0 +1,65 @@
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { trpc } from "@/lib/trpc";
+import { AlertTriangle, MinusCircle, PencilLine, Plus, ReceiptText } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { Link, useLocation, useRoute } from "wouter";
+
+type Item = { description: string; quantity: number; unitPrice: string; taxable: boolean };
+const emptyItem: Item = { description: "", quantity: 1, unitPrice: "0.00", taxable: true };
+const isoDay = (date: Date | string) => new Date(date).toISOString().slice(0, 10);
+const today = () => isoDay(new Date());
+const dueInThirty = () => { const value = new Date(); value.setDate(value.getDate() + 30); return isoDay(value); };
+const toCents = (value: string) => Math.max(0, Math.round((Number(value) || 0) * 100));
+const toDate = (value: string) => new Date(`${value}T12:00:00`);
+const money = (cents: number, currency: string) => new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
+
+export default function InvoiceEditor() {
+  const { activeCompany } = useWorkspace();
+  const [, setLocation] = useLocation();
+  const [editMatch, params] = useRoute("/invoices/:invoiceId/edit");
+  const editingId = editMatch ? Number(params?.invoiceId) : null;
+  const utils = trpc.useUtils();
+  const contacts = trpc.contacts.list.useQuery({ companyId: activeCompany?.id ?? 0 }, { enabled: Boolean(activeCompany) });
+  const existing = trpc.invoices.get.useQuery({ companyId: activeCompany?.id ?? 0, invoiceId: editingId ?? 0 }, { enabled: Boolean(activeCompany && editingId) });
+  const [contactId, setContactId] = useState("");
+  const [currency, setCurrency] = useState("USD");
+  const [issueDate, setIssueDate] = useState(today());
+  const [dueDate, setDueDate] = useState(dueInThirty());
+  const [taxRate, setTaxRate] = useState("0");
+  const [discountRate, setDiscountRate] = useState("0");
+  const [notes, setNotes] = useState("");
+  const [terms, setTerms] = useState("Payment due within 30 days.");
+  const [paymentInstructions, setPaymentInstructions] = useState("");
+  const [items, setItems] = useState<Item[]>([{ ...emptyItem }]);
+  const loadedInvoiceId = useRef<number | null>(null);
+  useEffect(() => {
+    const data = existing.data;
+    if (!data || loadedInvoiceId.current === data.invoice.id) return;
+    loadedInvoiceId.current = data.invoice.id;
+    setContactId(String(data.invoice.contactId)); setCurrency(data.invoice.currency); setIssueDate(isoDay(data.invoice.issueDate)); setDueDate(isoDay(data.invoice.dueDate));
+    setTaxRate((data.invoice.taxRateBps / 100).toFixed(2).replace(/\.00$/, "")); setDiscountRate((data.invoice.discountRateBps / 100).toFixed(2).replace(/\.00$/, ""));
+    setNotes(data.invoice.notes || ""); setTerms(data.invoice.terms || ""); setPaymentInstructions(data.invoice.paymentInstructions || "");
+    setItems(data.lineItems.map(item => ({ description: item.description, quantity: item.quantity, unitPrice: (item.unitPriceCents / 100).toFixed(2), taxable: item.taxable })));
+  }, [existing.data]);
+  const create = trpc.invoices.create.useMutation({ onSuccess: invoice => { toast.success(`Draft ${invoice?.invoice.invoiceNumber} created.`); utils.invoices.list.invalidate(); setLocation("/invoices"); }, onError: error => toast.error(error.message) });
+  const update = trpc.invoices.updateDraft.useMutation({ onSuccess: invoice => { toast.success(`Draft ${invoice?.invoice.invoiceNumber} updated.`); utils.invoices.list.invalidate(); utils.invoices.get.invalidate(); setLocation("/invoices"); }, onError: error => toast.error(error.message) });
+  const canCreate = activeCompany?.memberRole === "company_creator" || activeCompany?.memberRole === "platform_admin";
+  const totals = useMemo(() => { const subtotal = items.reduce((sum, item) => sum + Math.max(1, item.quantity || 1) * toCents(item.unitPrice), 0); const taxable = items.filter(item => item.taxable).reduce((sum, item) => sum + Math.max(1, item.quantity || 1) * toCents(item.unitPrice), 0); const discount = Math.round(subtotal * Math.max(0, Number(discountRate) || 0) / 100); const tax = Math.round(Math.max(0, taxable - Math.round(taxable * Math.max(0, Number(discountRate) || 0) / 100)) * Math.max(0, Number(taxRate) || 0) / 100); return { subtotal, discount, tax, total: Math.max(0, subtotal - discount + tax) }; }, [discountRate, items, taxRate]);
+  if (!activeCompany) return <div className="empty-state"><ReceiptText size={30} /><h3>No active company</h3><p>Select a company with invoice creator access to work with drafts.</p></div>;
+  if (!canCreate) return <div className="empty-state"><AlertTriangle size={30} /><h3>Creator access required</h3><p>Your role can view and download invoices, but cannot create or edit a draft.</p><Link href="/invoices" className="button button-secondary">Back to invoices</Link></div>;
+  if (editingId && existing.isLoading) return <div className="app-loading"><span className="loading-orb" />Loading secure invoice draft…</div>;
+  if (editingId && existing.data?.invoice.status !== "draft") return <div className="empty-state"><AlertTriangle size={30} /><h3>This invoice is read-only</h3><p>Only drafts can be changed. Finalized documents retain their server-calculated terms and totals.</p><Link href="/invoices" className="button button-secondary">Back to invoices</Link></div>;
+  const setItem = (index: number, patch: Partial<Item>) => setItems(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  const save = () => { if (!contactId) { toast.error("Select a client before saving the invoice."); return; } if (items.some(item => !item.description.trim())) { toast.error("Each invoice line needs a description."); return; } const payload = { companyId: activeCompany.id, contactId: Number(contactId), currency, issueDate: toDate(issueDate), dueDate: toDate(dueDate), taxRateBps: Math.round((Number(taxRate) || 0) * 100), discountRateBps: Math.round((Number(discountRate) || 0) * 100), notes: notes || null, terms: terms || null, paymentInstructions: paymentInstructions || null, lineItems: items.map(item => ({ description: item.description.trim(), quantity: Math.max(1, Number(item.quantity) || 1), unitPriceCents: toCents(item.unitPrice), taxable: item.taxable })) }; if (editingId) update.mutate({ ...payload, invoiceId: editingId }); else create.mutate(payload); };
+  const saving = create.isPending || update.isPending;
+  const selectedContact = contacts.data?.find(client => client.id === Number(contactId));
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">Document composer</span><h1>{editingId ? "Edit invoice draft" : "Create an invoice"}</h1><p>{editingId ? "Draft updates replace the full server-validated item set atomically." : "All totals are recalculated on the server before this draft can be saved."}</p></div><div className="page-heading-actions"><Link href="/invoices" className="button button-secondary">Cancel</Link><button className="button button-primary" disabled={saving} onClick={save}>{saving ? "Saving…" : editingId ? "Update draft" : "Save draft"}</button></div></div>
+    {!contacts.data?.length && <div className="notice notice-warn" style={{ marginBottom: 18 }}><AlertTriangle size={17} /><span>Add a client in the address book before you create an invoice. <Link href="/clients" className="link-button">Go to clients</Link></span></div>}
+    <div className="invoice-layout"><div className="stack"><section className="panel"><div className="panel-header"><div><h2>Invoice details</h2><p>Recipient and document dates.</p></div></div><div className="panel-body"><div className="form-grid three"><div className="form-field span-2"><label>Client</label><select className="field-select" value={contactId} onChange={event => setContactId(event.target.value)}><option value="">Select a saved client</option>{contacts.data?.map(contact => <option key={contact.id} value={contact.id}>{contact.companyName}{contact.contactName ? ` — ${contact.contactName}` : ""}</option>)}</select></div><div className="form-field"><label>Currency</label><select className="field-select" value={currency} onChange={event => setCurrency(event.target.value)}><option>USD</option><option>CAD</option><option>EUR</option><option>GBP</option></select></div><div className="form-field"><label>Issue date</label><input className="field-input" type="date" value={issueDate} onChange={event => setIssueDate(event.target.value)} /></div><div className="form-field"><label>Due date</label><input className="field-input" type="date" value={dueDate} onChange={event => setDueDate(event.target.value)} /></div><div className="form-field"><label>Tax rate (%)</label><input className="field-input" type="number" min="0" max="100" step="0.01" value={taxRate} onChange={event => setTaxRate(event.target.value)} /></div></div></div></section>
+      <section className="panel"><div className="panel-header"><div><h2>Line items</h2><p>Prices are entered as whole currency amounts and stored as cents.</p></div><button className="button button-secondary" onClick={() => setItems(current => [...current, { ...emptyItem }])}><Plus size={15} />Add line</button></div><div className="panel-body"><div className="invoice-line-scroll"><table className="invoice-lines"><thead><tr><th className="line-description">Description</th><th>Quantity</th><th>Unit price</th><th>Taxable</th><th /></tr></thead><tbody>{items.map((item, index) => <tr key={index}><td><input className="field-input" placeholder="Service or product" value={item.description} onChange={event => setItem(index, { description: event.target.value })} /></td><td><input className="field-input" type="number" min="1" value={item.quantity} onChange={event => setItem(index, { quantity: Number(event.target.value) })} /></td><td><input className="field-input" inputMode="decimal" value={item.unitPrice} onChange={event => setItem(index, { unitPrice: event.target.value })} /></td><td style={{ textAlign: "center" }}><input type="checkbox" checked={item.taxable} onChange={event => setItem(index, { taxable: event.target.checked })} aria-label="Taxable line" /></td><td><button className="remove-line" disabled={items.length === 1} onClick={() => setItems(current => current.filter((_, itemIndex) => itemIndex !== index))} aria-label="Remove line"><MinusCircle size={16} /></button></td></tr>)}</tbody></table></div><div className="form-grid" style={{ marginTop: 16 }}><div className="form-field"><label>Discount (%)</label><input className="field-input" type="number" min="0" max="100" step="0.01" value={discountRate} onChange={event => setDiscountRate(event.target.value)} /></div></div></div></section>
+      <section className="panel"><div className="panel-header"><div><h2>Terms and instructions</h2><p>Included in the branded PDF.</p></div></div><div className="panel-body"><div className="form-grid"><div className="form-field span-2"><label>Payment instructions</label><textarea className="field-textarea" placeholder="Stripe link, ACH / wire instructions, or check remittance information" value={paymentInstructions} onChange={event => setPaymentInstructions(event.target.value)} /></div><div className="form-field"><label>Terms & conditions</label><textarea className="field-textarea" value={terms} onChange={event => setTerms(event.target.value)} /></div><div className="form-field"><label>Client-facing notes</label><textarea className="field-textarea" placeholder="Thank you for your business." value={notes} onChange={event => setNotes(event.target.value)} /></div></div></div></section></div>
+      <aside className="invoice-preview"><div className="preview-top" style={{ background: activeCompany.primaryColor }} /><div className="preview-body"><div className="preview-brand"><img src={activeCompany.logoKey ? `/manus-storage/${activeCompany.logoKey}` : "/brand/welfare-pride-logo.png"} alt={`${activeCompany.name} logo`} style={{ maxWidth: `${Math.min(160, Math.max(50, activeCompany.logoScale || 100))}%` }} /><span className="preview-title">INVOICE</span></div><div className="preview-client"><strong>{selectedContact?.companyName || "Bill to"}</strong>{selectedContact?.email || "Select a saved client"}<br />Due {dueDate}</div><hr className="preview-rule" /><div className="preview-row"><span>Subtotal</span><span>{money(totals.subtotal, currency)}</span></div>{totals.discount > 0 && <div className="preview-row"><span>Discount</span><span>−{money(totals.discount, currency)}</span></div>}{totals.tax > 0 && <div className="preview-row"><span>Tax</span><span>{money(totals.tax, currency)}</span></div>}<div className="preview-total" style={{ background: activeCompany.accentColor }}><span>Total due</span><strong>{money(totals.total, currency)}</strong></div><p style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.5, marginTop: 18 }}>{editingId ? <><PencilLine size={12} /> Draft changes remain editable until finalization.</> : "This preview reflects the server-calculated data that will appear in your final PDF."}</p></div></aside></div>
+  </>;
+}

@@ -1,28 +1,335 @@
 import { COOKIE_NAME } from "@shared/const";
+import { TRPCError } from "@trpc/server";
+import { z } from "zod";
+import {
+  assignCompanyMembership,
+  completeEmailLog,
+  createAuditLog,
+  createCompany,
+  createContact,
+  createEmailLog,
+  createInvoice,
+  DEFAULT_WELFARE_LOGO_KEY,
+  ensureDefaultTenantForUser,
+  getCompaniesForUser,
+  getCompanyById,
+  getDashboardMetrics,
+  getEmailProviderConfig,
+  getInvoiceBundle,
+  listCompanyMembers,
+  listContacts,
+  listEmailLogs,
+  listInvoices,
+  saveEmailProviderConfig,
+  setCompanyLogoKey,
+  setInvoiceStatus,
+  updateContact,
+  updateCompanyBranding,
+  updateInvoiceDraft,
+  type InvoiceLineInput,
+} from "./db";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { renderInvoicePdf, invoicePdfFilename } from "./services/pdf";
+import { escapeHtml, sendProviderEmail, testProviderConnection, type ProviderConfig } from "./services/mailer";
+import { validateLogoUpload } from "./services/images";
+import { storagePut } from "./storage";
+import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
+import { requireCompanyRole, requirePlatformAdmin } from "./security/access";
+
+const companyIdInput = z.object({ companyId: z.number().int().positive() });
+const color = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Use a six-digit hex color.");
+const date = z.coerce.date();
+const optionalText = (max: number) => z.string().trim().max(max).optional().nullable();
+const lineItemInput = z.object({
+  description: z.string().trim().min(1).max(500),
+  quantity: z.number().int().min(1).max(1_000_000),
+  unitPriceCents: z.number().int().min(0).max(100_000_000),
+  taxable: z.boolean().default(true),
+});
+const invoiceInput = z.object({
+  companyId: z.number().int().positive(),
+  contactId: z.number().int().positive(),
+  currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+  issueDate: date,
+  dueDate: date,
+  taxRateBps: z.number().int().min(0).max(10_000),
+  discountRateBps: z.number().int().min(0).max(10_000),
+  notes: optionalText(4000),
+  terms: optionalText(4000),
+  paymentInstructions: optionalText(4000),
+  lineItems: z.array(lineItemInput).min(1).max(100),
+});
+
+const graphConfigInput = z.object({
+  provider: z.literal("microsoft_graph"),
+  tenantId: z.string().trim().min(1).max(160),
+  clientId: z.string().trim().min(1).max(160),
+  clientSecret: z.string().min(1).max(4096),
+  senderEmail: z.string().trim().email().max(320),
+  displayName: z.string().trim().min(1).max(160),
+});
+const smtpConfigInput = z.object({
+  provider: z.literal("smtp"),
+  host: z.string().trim().min(1).max(253),
+  port: z.number().int().min(1).max(65535),
+  secure: z.boolean(),
+  username: z.string().trim().min(1).max(320),
+  password: z.string().min(1).max(4096),
+  fromEmail: z.string().trim().email().max(320),
+  displayName: z.string().trim().min(1).max(160),
+});
+const deliveryConfigInput = z.discriminatedUnion("provider", [graphConfigInput, smtpConfigInput]);
+
+function getCorrelationId(ctx: { res: { locals: Record<string, unknown> } }) {
+  const value = ctx.res.locals.correlationId;
+  return typeof value === "string" ? value : "trpc";
+}
+
+async function audit(ctx: { user: { id: number } | null; req: { ip?: string }; res: { locals: Record<string, unknown> } }, input: {
+  companyId?: number;
+  eventType: string;
+  resourceType?: string;
+  resourceId?: string;
+  outcome: "success" | "failure";
+  metadata?: Record<string, unknown>;
+}) {
+  try {
+    await createAuditLog({
+      companyId: input.companyId ?? null,
+      actorUserId: ctx.user?.id ?? null,
+      eventType: input.eventType,
+      resourceType: input.resourceType ?? null,
+      resourceId: input.resourceId ?? null,
+      outcome: input.outcome,
+      correlationId: getCorrelationId(ctx),
+      metadata: input.metadata,
+    });
+  } catch (error) {
+    console.error("Audit persistence failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
+function normalizedCompanies(entries: Awaited<ReturnType<typeof getCompaniesForUser>>) {
+  return entries.map((entry: any) => entry.company ? { ...entry.company, memberRole: entry.memberRole } : { ...entry, memberRole: "platform_admin" });
+}
+
+function assertInvoiceDates(input: z.infer<typeof invoiceInput>) {
+  if (input.dueDate.getTime() < input.issueDate.getTime()) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: "The due date cannot be before the issue date." });
+  }
+}
 
 export const appRouter = router({
-    // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
-      return {
-        success: true,
-      } as const;
+      ctx.res.clearCookie(COOKIE_NAME, { ...getSessionCookieOptions(ctx.req), maxAge: -1 });
+      return { success: true } as const;
     }),
   }),
 
-  // TODO: add feature routers here, e.g.
-  // todo: router({
-  //   list: protectedProcedure.query(({ ctx }) =>
-  //     db.getUserTodos(ctx.user.id)
-  //   ),
-  // }),
+  workspace: router({
+    overview: protectedProcedure.query(async ({ ctx }) => {
+      await ensureDefaultTenantForUser(ctx.user);
+      const companies = normalizedCompanies(await getCompaniesForUser(ctx.user));
+      const activeCompany = companies[0] ?? null;
+      const metrics = activeCompany ? await getDashboardMetrics(activeCompany.id) : null;
+      return { companies, activeCompany, metrics, isPlatformAdmin: ctx.user.role === "admin" };
+    }),
+  }),
+
+  company: router({
+    create: protectedProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().email().optional() })).mutation(async ({ ctx, input }) => {
+      requirePlatformAdmin(ctx.user);
+      const company = await createCompany({ name: input.name, email: input.email ?? null, createdByUserId: ctx.user.id });
+      await audit(ctx, { companyId: company?.id, eventType: "company.created", resourceType: "company", resourceId: String(company?.id), outcome: "success" });
+      return company;
+    }),
+    get: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId);
+      const company = await getCompanyById(input.companyId);
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Company not found." });
+      return company;
+    }),
+    updateBranding: protectedProcedure.input(companyIdInput.extend({
+      name: z.string().trim().min(2).max(160),
+      legalName: optionalText(220), email: z.string().email().optional().nullable(), phone: optionalText(64), website: optionalText(320),
+      addressLine1: optionalText(220), addressLine2: optionalText(220), city: optionalText(120), region: optionalText(120), postalCode: optionalText(32), country: z.string().trim().length(2).optional().nullable(),
+      primaryColor: color, accentColor: color, footerText: optionalText(1000), defaultBcc: z.string().email().optional().nullable(),
+      logoScale: z.number().int().min(50).max(160), logoAlignment: z.enum(["left", "right"]), invoicePrefix: z.string().trim().min(1).max(24),
+    })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      const { companyId, ...update } = input;
+      const company = await updateCompanyBranding(companyId, update);
+      await audit(ctx, { companyId, eventType: "company.branding.updated", resourceType: "company", resourceId: String(companyId), outcome: "success" });
+      return company;
+    }),
+    uploadLogo: protectedProcedure.input(companyIdInput.extend({ base64: z.string().min(1).max(7_000_000), mimeType: z.enum(["image/png", "image/jpeg"]) })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      const binary = Buffer.from(input.base64, "base64");
+      if (!binary.length || binary.toString("base64").replace(/=+$/, "") !== input.base64.replace(/=+$/, "")) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "The logo upload did not contain valid base64 data." });
+      }
+      const image = validateLogoUpload(binary, input.mimeType);
+      const stored = await storagePut(`companies/${input.companyId}/logos/company-logo.${image.extension}`, binary, image.mimeType);
+      const company = await setCompanyLogoKey(input.companyId, stored.key);
+      await audit(ctx, { companyId: input.companyId, eventType: "company.logo.uploaded", resourceType: "company", resourceId: String(input.companyId), outcome: "success", metadata: { width: image.width, height: image.height } });
+      return { company, logoUrl: stored.url };
+    }),
+    members: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      return listCompanyMembers(input.companyId);
+    }),
+    assignMember: protectedProcedure.input(companyIdInput.extend({ email: z.string().trim().email(), role: z.enum(["platform_admin", "company_creator", "company_viewer"]) })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      const members = await assignCompanyMembership(input.companyId, input.email, input.role);
+      await audit(ctx, { companyId: input.companyId, eventType: "company.member.assigned", resourceType: "company_member", outcome: "success", metadata: { email: input.email, role: input.role } });
+      return members;
+    }),
+  }),
+
+  contacts: router({
+    list: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId);
+      return listContacts(input.companyId);
+    }),
+    create: protectedProcedure.input(companyIdInput.extend({
+      companyName: z.string().trim().min(1).max(220), contactName: optionalText(180), email: z.string().email().optional().nullable(), phone: optionalText(64),
+      addressLine1: optionalText(220), addressLine2: optionalText(220), city: optionalText(120), region: optionalText(120), postalCode: optionalText(32), country: z.string().trim().length(2).optional().nullable(), notes: optionalText(2000),
+    })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const { companyId, ...contact } = input;
+      const created = await createContact(companyId, contact);
+      await audit(ctx, { companyId, eventType: "contact.created", resourceType: "contact", resourceId: String(created?.id), outcome: "success" });
+      return created;
+    }),
+    update: protectedProcedure.input(companyIdInput.extend({
+      contactId: z.number().int().positive(), companyName: z.string().trim().min(1).max(220), contactName: optionalText(180), email: z.string().email().optional().nullable(), phone: optionalText(64),
+      addressLine1: optionalText(220), addressLine2: optionalText(220), city: optionalText(120), region: optionalText(120), postalCode: optionalText(32), country: z.string().trim().length(2).optional().nullable(), notes: optionalText(2000),
+    })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const { companyId, contactId, ...contact } = input;
+      const updated = await updateContact(companyId, contactId, contact);
+      await audit(ctx, { companyId, eventType: "contact.updated", resourceType: "contact", resourceId: String(contactId), outcome: "success" });
+      return updated;
+    }),
+  }),
+
+  invoices: router({
+    list: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId);
+      return listInvoices(input.companyId);
+    }),
+    get: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId);
+      const bundle = await getInvoiceBundle(input.companyId, input.invoiceId);
+      if (!bundle) throw new TRPCError({ code: "NOT_FOUND", message: "Invoice not found." });
+      return bundle;
+    }),
+    create: protectedProcedure.input(invoiceInput).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      assertInvoiceDates(input);
+      const invoice = await createInvoice(input.companyId, ctx.user.id, input as Omit<z.infer<typeof invoiceInput>, "companyId">);
+      await audit(ctx, { companyId: input.companyId, eventType: "invoice.created", resourceType: "invoice", resourceId: String(invoice?.invoice.id), outcome: "success" });
+      return invoice;
+    }),
+    updateDraft: protectedProcedure.input(invoiceInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      assertInvoiceDates(input);
+      const { companyId, invoiceId, ...draft } = input;
+      const invoice = await updateInvoiceDraft(companyId, invoiceId, draft as Omit<z.infer<typeof invoiceInput>, "companyId">);
+      await audit(ctx, { companyId, eventType: "invoice.draft.updated", resourceType: "invoice", resourceId: String(invoiceId), outcome: "success" });
+      return invoice;
+    }),
+    finalize: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const invoice = await getInvoiceBundle(input.companyId, input.invoiceId);
+      if (!invoice) throw new TRPCError({ code: "NOT_FOUND", message: "Invoice not found." });
+      if (invoice.invoice.status !== "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Only draft invoices can be finalized." });
+      const updated = await setInvoiceStatus(input.companyId, input.invoiceId, "finalized", "draft");
+      await audit(ctx, { companyId: input.companyId, eventType: "invoice.finalized", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success" });
+      return updated;
+    }),
+    send: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const bundle = await getInvoiceBundle(input.companyId, input.invoiceId);
+      if (!bundle) throw new TRPCError({ code: "NOT_FOUND", message: "Invoice not found." });
+      if (bundle.invoice.status !== "finalized") throw new TRPCError({ code: "BAD_REQUEST", message: "Only finalized invoices can be sent. Drafts must be finalized first, and sent or paid invoices cannot be delivered again." });
+      if (!bundle.contact.email) throw new TRPCError({ code: "BAD_REQUEST", message: "This client needs an email address before the invoice can be sent." });
+      const configuration = await getEmailProviderConfig(input.companyId);
+      if (!configuration || !configuration.isActive) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "An administrator must configure a delivery provider before invoices can be sent." });
+      let provider: ProviderConfig;
+      try { provider = decryptConfig<ProviderConfig>(configuration.encryptedConfig); } catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Delivery credentials are unavailable. Ask an administrator to save the provider configuration again." }); }
+      const subject = `Invoice ${bundle.invoice.invoiceNumber} from ${bundle.company.name}`;
+      let logId: number | null = null;
+      try {
+        // Claim the finalized document before the outbound request. Concurrent callers cannot send it twice.
+        await setInvoiceStatus(input.companyId, input.invoiceId, "sending", "finalized");
+        logId = await createEmailLog({ companyId: input.companyId, invoiceId: input.invoiceId, provider: configuration.provider, recipient: bundle.contact.email, bcc: bundle.company.defaultBcc, subject, correlationId: getCorrelationId(ctx) });
+        const pdf = await renderInvoicePdf(bundle);
+        const total = new Intl.NumberFormat("en-US", { style: "currency", currency: bundle.invoice.currency }).format(bundle.invoice.totalCents / 100);
+        const clientName = escapeHtml(bundle.contact.contactName || bundle.contact.companyName);
+        await sendProviderEmail(provider, {
+          to: bundle.contact.email,
+          bcc: bundle.company.defaultBcc,
+          subject,
+          html: `<p>Hello ${clientName},</p><p>Please find invoice <strong>${escapeHtml(bundle.invoice.invoiceNumber)}</strong> attached. The amount due is <strong>${escapeHtml(total)}</strong>.</p><p>Thank you,<br/>${escapeHtml(bundle.company.name)}</p>`,
+          attachment: { filename: invoicePdfFilename(bundle.invoice.invoiceNumber), content: pdf },
+        });
+        await completeEmailLog(logId, "sent", "Provider accepted the email with PDF attachment.");
+        const updated = await setInvoiceStatus(input.companyId, input.invoiceId, "sent", "sending");
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.sent", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success", metadata: { provider: configuration.provider, emailLogId: logId } });
+        return updated;
+      } catch (error) {
+        const failureSummary = error instanceof Error ? error.message : "Delivery failed.";
+        // A failed outbound attempt is retryable only after the claim is safely returned to finalized.
+        try { await setInvoiceStatus(input.companyId, input.invoiceId, "finalized", "sending"); } catch { /* Preserve a completed competing transition if one occurred. */ }
+        if (logId !== null) await completeEmailLog(logId, "failed", failureSummary);
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.send.failed", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "failure", metadata: { provider: configuration.provider, emailLogId: logId } });
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "The provider could not deliver this invoice. Review the email log for details." });
+      }
+    }),
+  }),
+
+  delivery: router({
+    configuration: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      const config = await getEmailProviderConfig(input.companyId);
+      return { configured: Boolean(config?.isActive), provider: config?.provider ?? null, displayName: config?.displayName ?? null, encryptionReady: isEncryptionConfigured() };
+    }),
+    saveConfiguration: protectedProcedure.input(companyIdInput.extend({ config: deliveryConfigInput })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "APP_CONFIG_ENCRYPTION_KEY must be set before provider credentials can be stored." });
+      const saved = await saveEmailProviderConfig(input.companyId, ctx.user.id, { provider: input.config.provider, displayName: input.config.displayName, encryptedConfig: encryptConfig(input.config) });
+      await audit(ctx, { companyId: input.companyId, eventType: "delivery.configuration.saved", resourceType: "email_provider", resourceId: String(saved?.id), outcome: "success", metadata: { provider: input.config.provider } });
+      return { configured: Boolean(saved), provider: saved?.provider, displayName: saved?.displayName };
+    }),
+    sendTest: protectedProcedure.input(companyIdInput.extend({ recipient: z.string().trim().email() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      const config = await getEmailProviderConfig(input.companyId);
+      if (!config) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Save a provider configuration before sending a test email." });
+      let provider: ProviderConfig;
+      try { provider = decryptConfig<ProviderConfig>(config.encryptedConfig); } catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The encrypted provider configuration cannot be read. Save it again after confirming the encryption key." }); }
+      const logId = await createEmailLog({ companyId: input.companyId, provider: config.provider, recipient: input.recipient, subject: `Welfare Pride delivery test — ${config.displayName}`, correlationId: getCorrelationId(ctx) });
+      try {
+        const result = await testProviderConnection(provider, input.recipient);
+        await completeEmailLog(logId, "sent", `Test accepted by ${result.provider}; provider reference ${result.messageId}.`);
+        await audit(ctx, { companyId: input.companyId, eventType: "delivery.test.sent", resourceType: "email_provider", resourceId: String(config.id), outcome: "success", metadata: { provider: result.provider } });
+        return { ok: true, displayName: config.displayName, provider: result.provider };
+      } catch (error) {
+        await completeEmailLog(logId, "failed", error instanceof Error ? error.message : "Test delivery failed.");
+        await audit(ctx, { companyId: input.companyId, eventType: "delivery.test.failed", resourceType: "email_provider", resourceId: String(config.id), outcome: "failure", metadata: { provider: config.provider } });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: "The provider connection test failed. Review the email log for a safe error summary." });
+      }
+    }),
+    logs: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      return listEmailLogs(input.companyId);
+    }),
+  }),
 });
 
 export type AppRouter = typeof appRouter;
