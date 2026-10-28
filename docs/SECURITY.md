@@ -23,7 +23,7 @@ The server disables the `X-Powered-By` header, uses a request correlation identi
 
 Logo uploads accept PNG/JPEG only, inspect the binary signature and dimensions, limit size to 5 MB, generate a tenant-prefixed object key server-side, and store ownership via the company record. PDF rendering uses a bounded `fit` box and locally hosted Roboto files, so logo aspect ratios are preserved and untrusted image URLs are not fetched from the browser.
 
-Invoice values are accepted as minor currency units on the server after strict Zod validation. Subtotal, discount, taxable base, tax, and total are recomputed server-side; status changes block editing after finalization. PDF downloads use an authenticated route and `Cache-Control: private, no-store`.
+Invoice values are accepted as minor currency units on the server after strict Zod validation. Subtotal, discount, taxable base, tax, and total are recomputed server-side; status changes block editing after finalization. PDF downloads use an authenticated route and `Cache-Control: private, no-store`. Draft and finalized-review invoices use a provisional reference. The first actual send claims the document, atomically advances that company’s counter, and assigns `PREFIX-YEAR-NNNN`; concurrent sends cannot receive the same number. A number is not reclaimed after a failed or uncertain delivery, preventing accidental reuse.
 
 ## Webhook verification
 
@@ -36,6 +36,12 @@ The endpoint rejects unknown/malformed signatures using a timing-safe comparison
 
 ## Auditing and operational boundaries
 
-Security-sensitive actions including invoice creation/finalization/sending, logo upload, role assignment, branding changes, and delivery configuration/test attempts produce structured audit records with an actor, resource type, tenant, outcome, and correlation ID. Delivery attempts also create `queued`, `sent`, or `failed` email logs.
+Security-sensitive actions including invoice creation/finalization/sending, logo upload, role assignment, branding changes, and delivery configuration/test attempts produce structured audit records with an actor, resource type, tenant, outcome, and correlation ID. Invoice delivery creates a durable outbox log before provider dispatch. Known pre-dispatch failures are `failed`; a timeout, crash, or error after dispatch starts is `uncertain`, keeps the invoice in `sending`, and is never automatically resent. A company administrator must reconcile the provider outcome in Email logs by marking it delivered or explicitly enabling a later manual retry.
+
+## Recurring invoice scheduler
+
+Recurring schedule creation, pause/resume, and deletion require tenant creator access; automatic delivery additionally requires a tenant administrator and an active encrypted provider configuration. The server creates, updates, and deletes each platform scheduler task through a shared service identity, while retaining the initiating user only in the audit data. This lets any subsequently authorized tenant operator manage the schedule. `POST /api/scheduled/recurring-invoices` accepts only a verified platform scheduler identity, derives the schedule solely from that task UID, and does not trust callback-body company, invoice, or recipient values.
+
+Every UTC weekly/monthly occurrence has a unique run ledger row, a five-minute recoverable lease, and a durable invoice link recorded before delivery. Retries reuse that row and existing invoice record instead of creating another document. An in-progress or uncertain provider attempt is never duplicated. Schedule execution, created/finalized invoices, auto-send success, safe failures, and reconciliations are retained in the company audit trail.
 
 The included in-process rate limiter is a conservative baseline. For production multi-instance traffic, use Cloudflare WAF/rate limiting and a shared store such as Redis for gateway limits, CIDR controls, webhook queues, and dynamic blocklists. Configure Entra ID/Google/SAML/TOTP only after their provider metadata, policies, and organization-required enrollment controls are available; they are not represented as falsely active in this baseline.

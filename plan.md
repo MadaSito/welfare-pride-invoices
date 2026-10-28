@@ -21,6 +21,7 @@ The master prompt contains additional enterprise deployment and integration dire
    Credentials will be encrypted at rest using an application-held AES-256-GCM key and never returned to the browser. The configured provider will send a branded HTML summary with the invoice PDF attached, honor an optional BCC archive address, persist `queued`, `sent`, or `failed` audit results, and show an Admin **Email logs** page. Graph settings will include the requested **Send Test Email** action to verify the sender connection and configured display name. Successful end-to-end delivery requires the administrator to later supply real provider credentials and grant the Graph app `Mail.Send` application permission for the sender mailbox.
 6. **Security, observability, and webhooks.** All mutation inputs will be schema-validated; unsafe status transitions will be prevented; database rows will be scoped to the company membership; sensitive routes will be rate-limited; and audit events will capture actor, tenant, resource, request correlation identifier, and outcome. A raw-body HMAC-SHA256 webhook verification endpoint will be included with a timestamp/replay window and a protected secret configuration requirement. CORS/CSP/cookie settings will preserve the managed Preview login behavior.
 7. **Deployment and source control.** The repository will remain Docker-ready, expose an unauthenticated health path, honor `PORT`, and include deployment notes for Hostinger Node/Passenger, Docker Compose/VPS, and Cloudflare proxy/WAF configuration. On completion the project will be connected to a new private GitHub repository through the managed GitHub transfer flow and pushed to `main` after the user confirms the repository card.
+8. **Recurring invoices and send-time numbering.** Invoice creators and company administrators will be able to save weekly or monthly invoice templates with a UTC delivery time, recipient, due-days, line items, taxes, terms, and payment instructions. A recurring schedule can either create a finalized invoice for review or, when an encrypted email provider is configured and the administrator explicitly opts in, send it automatically. Platform/service-owned Heartbeat jobs authenticate each callback, resolve the schedule exclusively by the scheduler-issued task UID, and use a durable per-occurrence run ledger with a recoverable lease and invoice link to prevent duplicate documents. Drafts use a clearly provisional reference; a company-scoped sequential document number (`PREFIX-YEAR-NNNN`) is allocated atomically only on the first actual send attempt. A durable outbox enters an explicit uncertain state before provider dispatch and blocks automatic resend until an administrator reconciles the outcome; an allocated number is never reused.
 
 ## Design direction — Welfare Pride operations console
 
@@ -47,6 +48,8 @@ The master prompt contains additional enterprise deployment and integration dire
 - `email_logs`: provider, recipient, BCC state, invoice reference, status, response summary, correlation ID, and timestamps.
 - `audit_logs`: structured change/event history scoped to tenant and actor.
 - `webhook_events`: protected inbound-event receipt data and replay token/key material reference.
+- `recurring_invoice_schedules` / `recurring_invoice_line_items`: tenant-scoped recurring template, cadence, UTC run time, next callback state, optional automatic delivery, and immutable schedule line items.
+- `recurring_invoice_runs`: unique schedule-occurrence ledger used to make scheduler retries idempotent and retain the resulting invoice and safe status summary.
 
 The PDF generator, logo-storage service, encryption helper, delivery adapters, HMAC verifier, audit service, and request security middleware will be isolated under `server/services/` and `server/security/`. This prevents the UI from owning secrets or business-critical authorization logic.
 
@@ -57,12 +60,12 @@ client/
   public/brand/                 # supplied original logo, dark/light variants, small document assets, Roboto web fonts
   public/manus-routes.json      # declared product routes
   src/components/               # shell, invoice form, logo fit control, reusable operational UI
-  src/pages/                    # dashboard, invoices, clients, branding, delivery, email logs, security
+  src/pages/                    # dashboard, invoices, recurring schedules, clients, branding, delivery, email logs, security
   src/styles/                   # Welfare Pride design tokens and document preview styles
 server/
   security/                     # tenant authorization, HMAC verification, request limits, correlation IDs
   services/                     # PDFs, encrypted settings, Graph adapter, SMTP adapter, logo storage, audit service
-  routes/                       # raw-body webhook and authenticated PDF download HTTP routes
+  routes/                       # raw-body webhook, authenticated PDF download, and scheduler callback HTTP routes
   db.ts                         # scoped Drizzle persistence helpers
   routers.ts                    # validated tRPC business procedures
 drizzle/

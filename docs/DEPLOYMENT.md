@@ -58,3 +58,11 @@ Terminate TLS at Cloudflare or a hardened reverse proxy, never expose the raw No
 ## Go-live verification
 
 Confirm that the health endpoint answers, a user can complete real OAuth login, the first administrator can see the default Welfare Pride company, an authorized logo can be uploaded, a PDF downloads, the selected provider test appears in Email logs, and a rejected webhook receives no processing acknowledgement. Ensure test clients and test invoices are removed or clearly marked before production use.
+
+## Recurring invoices
+
+Recurring schedules are application-owned platform Heartbeat jobs. They run only against a **published** version that contains `POST /api/scheduled/recurring-invoices`; a local preview or an un-published Git push cannot execute a live schedule. Create schedules from **Recurring invoices** after deployment, choose a weekly or monthly UTC run time, and either leave the default review-first mode or enable auto-send only after a protected Graph/SMTP provider is active.
+
+The scheduler is created and managed through the application’s shared platform service identity, so any appropriately authorized company operator can pause, resume, or remove a schedule regardless of who created it. It authenticates callbacks with a platform-issued signed ticket; the handler resolves the schedule from that ticket’s task UID and ignores request-body identifiers. Each schedule occurrence is stored in an idempotency ledger with a recoverable lease and a durable invoice link, so retries or a process interruption cannot create a duplicate invoice.
+
+Invoice drafts and finalized review documents use provisional references. A company-scoped number in `PREFIX-YEAR-NNNN` form is allocated atomically on the first send attempt—manual or automatic. Known pre-dispatch failures may be safely retried; any failure after provider dispatch begins is marked **uncertain**, stays out of automatic resend, and requires a company administrator to reconcile it in **Email logs** after checking the provider. A number is never reused.

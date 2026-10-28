@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import {
   Bell,
   Building2,
+  CalendarClock,
   ChevronDown,
   FilePlus2,
   FileText,
@@ -23,6 +24,7 @@ import { Link, useLocation } from "wouter";
 const navigation = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/invoices", label: "Invoices", icon: FileText },
+  { href: "/recurring-invoices", label: "Recurring", icon: CalendarClock },
   { href: "/clients", label: "Clients", icon: UsersRound },
 ];
 const administration = [

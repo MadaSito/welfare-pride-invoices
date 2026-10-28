@@ -9,6 +9,7 @@ import EmailLogs from "@/pages/EmailLogs";
 import Home from "@/pages/Home";
 import InvoiceEditor from "@/pages/InvoiceEditor";
 import Invoices from "@/pages/Invoices";
+import RecurringInvoices from "@/pages/RecurringInvoices";
 import NotFound from "@/pages/NotFound";
 import Security from "@/pages/Security";
 import { Route, Switch } from "wouter";
@@ -23,6 +24,7 @@ function Router() {
         <Route path="/invoices" component={Invoices} />
         <Route path="/invoices/new" component={InvoiceEditor} />
         <Route path="/invoices/:invoiceId/edit" component={InvoiceEditor} />
+        <Route path="/recurring-invoices" component={RecurringInvoices} />
         <Route path="/clients" component={ClientDirectory} />
         <Route path="/branding" component={Branding} />
         <Route path="/delivery" component={Delivery} />

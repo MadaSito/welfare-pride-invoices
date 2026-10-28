@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { calculateInvoiceTotals } from "./db";
+import { calculateInvoiceTotals, formatInvoiceNumber, isProvisionalInvoiceNumber, recurringOccurrenceKey } from "./db";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
 
 const originalKey = process.env.APP_CONFIG_ENCRYPTION_KEY;
@@ -16,6 +16,19 @@ describe("invoice totals", () => {
       { description: "Non-taxable material", quantity: 1, unitPriceCents: 10_000, taxable: false },
     ], 800, 1000);
     expect(totals).toEqual({ subtotalCents: 35_000, discountCents: 3_500, taxCents: 1_800, totalCents: 33_300 });
+  });
+});
+
+describe("sent invoice numbering and recurrence keys", () => {
+  it("formats a tenant-local sequential sent-document number and distinguishes provisional references", () => {
+    expect(formatInvoiceNumber("WP", new Date("2026-10-28T09:00:00Z"), 1001)).toBe("WP-2026-1001");
+    expect(isProvisionalInvoiceNumber("DRAFT-ABCDEFGH12")).toBe(true);
+    expect(isProvisionalInvoiceNumber("WP-2026-1001")).toBe(false);
+  });
+
+  it("uses one idempotency occurrence key per UTC weekly or monthly period", () => {
+    expect(recurringOccurrenceKey("weekly", new Date("2026-10-28T09:00:00Z"))).toBe("week-2026-10-26");
+    expect(recurringOccurrenceKey("monthly", new Date("2026-10-28T09:00:00Z"))).toBe("month-2026-10");
   });
 });
 

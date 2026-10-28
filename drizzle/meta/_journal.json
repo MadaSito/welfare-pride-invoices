@@ -22,6 +22,20 @@
       "when": 1793110837069,
       "tag": "0002_noisy_human_robot",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1793184115058,
+      "tag": "0003_productive_chameleon",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1793184787656,
+      "tag": "0004_exotic_starbolt",
+      "breakpoints": true
     }
   ]
 }

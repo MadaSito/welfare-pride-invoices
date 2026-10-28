@@ -1,5 +1,6 @@
 import { COOKIE_NAME } from "@shared/const";
 import { TRPCError } from "@trpc/server";
+import crypto from "node:crypto";
 import { z } from "zod";
 import {
   assignCompanyMembership,
@@ -9,17 +10,23 @@ import {
   createContact,
   createEmailLog,
   createInvoice,
+  createRecurringInvoiceSchedule,
   DEFAULT_WELFARE_LOGO_KEY,
+  deleteRecurringInvoiceSchedule,
   ensureDefaultTenantForUser,
   getCompaniesForUser,
   getCompanyById,
   getDashboardMetrics,
   getEmailProviderConfig,
   getInvoiceBundle,
+  getRecurringInvoiceSchedule,
   listCompanyMembers,
   listContacts,
   listEmailLogs,
   listInvoices,
+  listRecurringInvoiceSchedules,
+  reconcileUncertainInvoiceDelivery,
+  setRecurringInvoiceScheduleActive,
   saveEmailProviderConfig,
   setCompanyLogoKey,
   setInvoiceStatus,
@@ -29,10 +36,11 @@ import {
   type InvoiceLineInput,
 } from "./db";
 import { getSessionCookieOptions } from "./_core/cookies";
+import { createHeartbeatJob, deleteHeartbeatJob, updateHeartbeatJob } from "./_core/heartbeat";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
-import { renderInvoicePdf, invoicePdfFilename } from "./services/pdf";
-import { escapeHtml, sendProviderEmail, testProviderConnection, type ProviderConfig } from "./services/mailer";
+import { testProviderConnection, type ProviderConfig } from "./services/mailer";
+import { deliverFinalizedInvoice, InvoiceDeliveryError } from "./services/invoiceDelivery";
 import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
@@ -60,6 +68,28 @@ const invoiceInput = z.object({
   terms: optionalText(4000),
   paymentInstructions: optionalText(4000),
   lineItems: z.array(lineItemInput).min(1).max(100),
+});
+const recurringInvoiceInput = z.object({
+  companyId: z.number().int().positive(),
+  name: z.string().trim().min(2).max(160),
+  contactId: z.number().int().positive(),
+  cadence: z.enum(["weekly", "monthly"]),
+  dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
+  dayOfMonth: z.number().int().min(1).max(28).optional().nullable(),
+  hourUtc: z.number().int().min(0).max(23),
+  minuteUtc: z.number().int().min(0).max(59),
+  dueDays: z.number().int().min(0).max(365),
+  autoSend: z.boolean(),
+  currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+  taxRateBps: z.number().int().min(0).max(10_000),
+  discountRateBps: z.number().int().min(0).max(10_000),
+  notes: optionalText(4000),
+  terms: optionalText(4000),
+  paymentInstructions: optionalText(4000),
+  lineItems: z.array(lineItemInput).min(1).max(100),
+}).superRefine((value, ctx) => {
+  if (value.cadence === "weekly" && value.dayOfWeek == null) ctx.addIssue({ code: "custom", path: ["dayOfWeek"], message: "Choose a day of week for a weekly schedule." });
+  if (value.cadence === "monthly" && value.dayOfMonth == null) ctx.addIssue({ code: "custom", path: ["dayOfMonth"], message: "Choose a day of month for a monthly schedule." });
 });
 
 const graphConfigInput = z.object({
@@ -119,6 +149,19 @@ function assertInvoiceDates(input: z.infer<typeof invoiceInput>) {
   if (input.dueDate.getTime() < input.issueDate.getTime()) {
     throw new TRPCError({ code: "BAD_REQUEST", message: "The due date cannot be before the issue date." });
   }
+}
+
+function recurrenceCron(input: z.infer<typeof recurringInvoiceInput>) {
+  const seconds = 0;
+  return input.cadence === "weekly"
+    ? `${seconds} ${input.minuteUtc} ${input.hourUtc} * * ${input.dayOfWeek}`
+    : `${seconds} ${input.minuteUtc} ${input.hourUtc} ${input.dayOfMonth} * *`;
+}
+
+function nextRunDate(value?: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 export const appRouter = router({
@@ -218,6 +261,61 @@ export const appRouter = router({
     }),
   }),
 
+  recurringInvoices: router({
+    list: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId);
+      return listRecurringInvoiceSchedules(input.companyId);
+    }),
+    create: protectedProcedure.input(recurringInvoiceInput).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      if (input.autoSend) {
+        await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+        const config = await getEmailProviderConfig(input.companyId);
+        if (!config?.isActive) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Configure an active email provider before enabling automatic recurring delivery." });
+      }
+      const task = await createHeartbeatJob({
+        name: `recurring-invoice-${input.companyId}-${crypto.randomUUID()}`,
+        cron: recurrenceCron(input),
+        path: "/api/scheduled/recurring-invoices",
+        method: "POST",
+        payload: {},
+        description: `Recurring invoice schedule for company ${input.companyId}.`,
+      }, "");
+      try {
+        const schedule = await createRecurringInvoiceSchedule({
+          ...input,
+          companyId: input.companyId,
+          createdByUserId: ctx.user.id,
+          heartbeatTaskUid: task.taskUid,
+          nextRunAt: nextRunDate(task.nextExecutionAt),
+        });
+        await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.created", resourceType: "recurring_invoice_schedule", resourceId: String(schedule?.schedule.id), outcome: "success", metadata: { cadence: input.cadence, autoSend: input.autoSend } });
+        return schedule;
+      } catch (error) {
+        try { await deleteHeartbeatJob(task.taskUid, ""); } catch { /* Orphan prevention is best effort; platform task has no business identifier in its payload. */ }
+        throw error;
+      }
+    }),
+    setActive: protectedProcedure.input(companyIdInput.extend({ scheduleId: z.number().int().positive(), isActive: z.boolean() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const schedule = await getRecurringInvoiceSchedule(input.companyId, input.scheduleId);
+      if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring schedule not found." });
+      const task = await updateHeartbeatJob(schedule.schedule.heartbeatTaskUid, { enable: input.isActive }, "");
+      const updated = await setRecurringInvoiceScheduleActive(input.companyId, input.scheduleId, input.isActive, input.isActive ? nextRunDate(task.nextExecutionAt) : null);
+      await audit(ctx, { companyId: input.companyId, eventType: input.isActive ? "recurring_invoice.resumed" : "recurring_invoice.paused", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
+      return updated;
+    }),
+    delete: protectedProcedure.input(companyIdInput.extend({ scheduleId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const schedule = await getRecurringInvoiceSchedule(input.companyId, input.scheduleId);
+      if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring schedule not found." });
+      await deleteHeartbeatJob(schedule.schedule.heartbeatTaskUid, "");
+      await deleteRecurringInvoiceSchedule(input.companyId, input.scheduleId);
+      await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.deleted", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
+      return { deleted: true } as const;
+    }),
+  }),
+
   invoices: router({
     list: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId);
@@ -255,41 +353,24 @@ export const appRouter = router({
     }),
     send: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "company_creator");
-      const bundle = await getInvoiceBundle(input.companyId, input.invoiceId);
-      if (!bundle) throw new TRPCError({ code: "NOT_FOUND", message: "Invoice not found." });
-      if (bundle.invoice.status !== "finalized") throw new TRPCError({ code: "BAD_REQUEST", message: "Only finalized invoices can be sent. Drafts must be finalized first, and sent or paid invoices cannot be delivered again." });
-      if (!bundle.contact.email) throw new TRPCError({ code: "BAD_REQUEST", message: "This client needs an email address before the invoice can be sent." });
-      const configuration = await getEmailProviderConfig(input.companyId);
-      if (!configuration || !configuration.isActive) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "An administrator must configure a delivery provider before invoices can be sent." });
-      let provider: ProviderConfig;
-      try { provider = decryptConfig<ProviderConfig>(configuration.encryptedConfig); } catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Delivery credentials are unavailable. Ask an administrator to save the provider configuration again." }); }
-      const subject = `Invoice ${bundle.invoice.invoiceNumber} from ${bundle.company.name}`;
-      let logId: number | null = null;
       try {
-        // Claim the finalized document before the outbound request. Concurrent callers cannot send it twice.
-        await setInvoiceStatus(input.companyId, input.invoiceId, "sending", "finalized");
-        logId = await createEmailLog({ companyId: input.companyId, invoiceId: input.invoiceId, provider: configuration.provider, recipient: bundle.contact.email, bcc: bundle.company.defaultBcc, subject, correlationId: getCorrelationId(ctx) });
-        const pdf = await renderInvoicePdf(bundle);
-        const total = new Intl.NumberFormat("en-US", { style: "currency", currency: bundle.invoice.currency }).format(bundle.invoice.totalCents / 100);
-        const clientName = escapeHtml(bundle.contact.contactName || bundle.contact.companyName);
-        await sendProviderEmail(provider, {
-          to: bundle.contact.email,
-          bcc: bundle.company.defaultBcc,
-          subject,
-          html: `<p>Hello ${clientName},</p><p>Please find invoice <strong>${escapeHtml(bundle.invoice.invoiceNumber)}</strong> attached. The amount due is <strong>${escapeHtml(total)}</strong>.</p><p>Thank you,<br/>${escapeHtml(bundle.company.name)}</p>`,
-          attachment: { filename: invoicePdfFilename(bundle.invoice.invoiceNumber), content: pdf },
-        });
-        await completeEmailLog(logId, "sent", "Provider accepted the email with PDF attachment.");
-        const updated = await setInvoiceStatus(input.companyId, input.invoiceId, "sent", "sending");
-        await audit(ctx, { companyId: input.companyId, eventType: "invoice.sent", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success", metadata: { provider: configuration.provider, emailLogId: logId } });
-        return updated;
+        const delivery = await deliverFinalizedInvoice({ companyId: input.companyId, invoiceId: input.invoiceId, correlationId: getCorrelationId(ctx) });
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.sent", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success", metadata: { provider: delivery.provider, emailLogId: delivery.emailLogId } });
+        return delivery.invoice;
       } catch (error) {
-        const failureSummary = error instanceof Error ? error.message : "Delivery failed.";
-        // A failed outbound attempt is retryable only after the claim is safely returned to finalized.
-        try { await setInvoiceStatus(input.companyId, input.invoiceId, "finalized", "sending"); } catch { /* Preserve a completed competing transition if one occurred. */ }
-        if (logId !== null) await completeEmailLog(logId, "failed", failureSummary);
-        await audit(ctx, { companyId: input.companyId, eventType: "invoice.send.failed", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "failure", metadata: { provider: configuration.provider, emailLogId: logId } });
-        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "The provider could not deliver this invoice. Review the email log for details." });
+        const safeMessage = error instanceof InvoiceDeliveryError ? error.message : "The provider could not deliver this invoice. Review the email log for details.";
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.send.failed", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "failure", metadata: { provider: error instanceof InvoiceDeliveryError ? error.provider : undefined, emailLogId: error instanceof InvoiceDeliveryError ? error.emailLogId : undefined } });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: safeMessage });
+      }
+    }),
+    reconcileUncertainDelivery: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive(), resolution: z.enum(["mark_sent", "retry"]) })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const invoice = await reconcileUncertainInvoiceDelivery(input.companyId, input.invoiceId, input.resolution);
+        await audit(ctx, { companyId: input.companyId, eventType: `invoice.delivery.${input.resolution}`, resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success" });
+        return invoice;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The uncertain delivery could not be reconciled." });
       }
     }),
   }),

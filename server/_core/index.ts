@@ -8,6 +8,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { registerInvoiceHttpRoutes, registerWebhookRoutes } from "../routes/invoiceRoutes";
+import { registerRecurringInvoiceScheduledRoutes } from "../routes/recurringInvoiceRoutes";
 import { apiRateLimit, requestSecurity } from "../security/requestSecurity";
 
 async function startServer() {
@@ -29,6 +30,7 @@ async function startServer() {
   });
   registerOAuthRoutes(app);
   registerInvoiceHttpRoutes(app);
+  registerRecurringInvoiceScheduledRoutes(app);
   // tRPC API
   app.use(
     "/api/trpc",

@@ -10,10 +10,15 @@ import {
   emailProviderConfigs,
   invoiceLineItems,
   invoices,
+  recurringInvoiceLineItems,
+  recurringInvoiceRuns,
+  recurringInvoiceSchedules,
   type CompanyMemberRole,
   type EmailProvider,
   type InsertUser,
   type InvoiceStatus,
+  type RecurringInvoiceCadence,
+  type RecurringInvoiceRunStatus,
   type User,
   users,
   webhookEvents,
@@ -227,8 +232,16 @@ export function calculateInvoiceTotals(lineItems: InvoiceLineInput[], taxRateBps
   };
 }
 
-function nextInvoiceNumber(prefix: string) {
-  return `${prefix || "INV"}-${new Date().getUTCFullYear()}-${nanoid(7).toUpperCase()}`;
+function nextDraftReference() {
+  return `DRAFT-${nanoid(10).toUpperCase()}`;
+}
+
+export function isProvisionalInvoiceNumber(invoiceNumber: string) {
+  return invoiceNumber.startsWith("DRAFT-");
+}
+
+export function formatInvoiceNumber(prefix: string, issuedAt: Date, sequence: number) {
+  return `${prefix || "INV"}-${issuedAt.getUTCFullYear()}-${String(sequence).padStart(4, "0")}`;
 }
 
 export async function createInvoice(companyId: number, createdByUserId: number, input: {
@@ -242,6 +255,9 @@ export async function createInvoice(companyId: number, createdByUserId: number, 
   terms?: string | null;
   paymentInstructions?: string | null;
   lineItems: InvoiceLineInput[];
+  initialStatus?: "draft" | "finalized";
+  recurringScheduleId?: number | null;
+  recurringOccurrenceKey?: string | null;
 }) {
   const db = await requireDb();
   const company = await getCompanyById(companyId);
@@ -249,12 +265,14 @@ export async function createInvoice(companyId: number, createdByUserId: number, 
   const client = (await db.select().from(contacts).where(and(eq(contacts.id, input.contactId), eq(contacts.companyId, companyId))).limit(1))[0];
   if (!client) throw new Error("Client does not belong to this company");
   const totals = calculateInvoiceTotals(input.lineItems, input.taxRateBps, input.discountRateBps);
+  const initialStatus = input.initialStatus ?? "draft";
   let invoiceId = 0;
   await db.transaction(async tx => {
     const insert = await tx.insert(invoices).values({
       companyId,
       contactId: input.contactId,
-      invoiceNumber: nextInvoiceNumber(company.invoicePrefix),
+      invoiceNumber: nextDraftReference(),
+      status: initialStatus,
       currency: input.currency.toUpperCase(),
       issueDate: input.issueDate,
       dueDate: input.dueDate,
@@ -265,6 +283,9 @@ export async function createInvoice(companyId: number, createdByUserId: number, 
       terms: input.terms ?? null,
       paymentInstructions: input.paymentInstructions ?? null,
       createdByUserId,
+      recurringScheduleId: input.recurringScheduleId ?? null,
+      recurringOccurrenceKey: input.recurringOccurrenceKey ?? null,
+      ...(initialStatus === "finalized" ? { finalizedAt: new Date() } : {}),
     });
     invoiceId = Number(insert[0].insertId);
     await tx.insert(invoiceLineItems).values(input.lineItems.map((item, index) => ({ ...item, invoiceId, position: index + 1 })));
@@ -321,6 +342,195 @@ export async function listInvoices(companyId: number) {
     .orderBy(desc(invoices.createdAt));
 }
 
+export type RecurringInvoiceTemplateInput = {
+  contactId: number;
+  name: string;
+  cadence: RecurringInvoiceCadence;
+  dayOfWeek?: number | null;
+  dayOfMonth?: number | null;
+  hourUtc: number;
+  minuteUtc: number;
+  dueDays: number;
+  autoSend: boolean;
+  currency: string;
+  taxRateBps: number;
+  discountRateBps: number;
+  notes?: string | null;
+  terms?: string | null;
+  paymentInstructions?: string | null;
+  lineItems: InvoiceLineInput[];
+};
+
+export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemplateInput & {
+  companyId: number;
+  createdByUserId: number;
+  heartbeatTaskUid: string;
+  nextRunAt?: Date | null;
+}) {
+  const db = await requireDb();
+  const contact = (await db.select().from(contacts).where(and(eq(contacts.id, input.contactId), eq(contacts.companyId, input.companyId))).limit(1))[0];
+  if (!contact) throw new Error("Client does not belong to this company");
+  let scheduleId = 0;
+  await db.transaction(async tx => {
+    const insert = await tx.insert(recurringInvoiceSchedules).values({
+      companyId: input.companyId,
+      contactId: input.contactId,
+      name: input.name,
+      cadence: input.cadence,
+      dayOfWeek: input.dayOfWeek ?? null,
+      dayOfMonth: input.dayOfMonth ?? null,
+      hourUtc: input.hourUtc,
+      minuteUtc: input.minuteUtc,
+      dueDays: input.dueDays,
+      autoSend: input.autoSend,
+      heartbeatTaskUid: input.heartbeatTaskUid,
+      nextRunAt: input.nextRunAt ?? null,
+      currency: input.currency.toUpperCase(),
+      taxRateBps: input.taxRateBps,
+      discountRateBps: input.discountRateBps,
+      notes: input.notes ?? null,
+      terms: input.terms ?? null,
+      paymentInstructions: input.paymentInstructions ?? null,
+      createdByUserId: input.createdByUserId,
+    });
+    scheduleId = Number(insert[0].insertId);
+    await tx.insert(recurringInvoiceLineItems).values(input.lineItems.map((item, index) => ({ ...item, scheduleId, position: index + 1 })));
+  });
+  return getRecurringInvoiceSchedule(input.companyId, scheduleId);
+}
+
+export async function listRecurringInvoiceSchedules(companyId: number) {
+  const db = await requireDb();
+  return db
+    .select({ schedule: recurringInvoiceSchedules, contact: contacts })
+    .from(recurringInvoiceSchedules)
+    .innerJoin(contacts, eq(contacts.id, recurringInvoiceSchedules.contactId))
+    .where(eq(recurringInvoiceSchedules.companyId, companyId))
+    .orderBy(desc(recurringInvoiceSchedules.createdAt));
+}
+
+export async function getRecurringInvoiceSchedule(companyId: number, scheduleId: number) {
+  const db = await requireDb();
+  const result = await db
+    .select({ schedule: recurringInvoiceSchedules, contact: contacts })
+    .from(recurringInvoiceSchedules)
+    .innerJoin(contacts, eq(contacts.id, recurringInvoiceSchedules.contactId))
+    .where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)))
+    .limit(1);
+  if (!result[0]) return null;
+  const lineItems = await db.select().from(recurringInvoiceLineItems).where(eq(recurringInvoiceLineItems.scheduleId, scheduleId)).orderBy(asc(recurringInvoiceLineItems.position));
+  return { ...result[0], lineItems };
+}
+
+export async function getRecurringInvoiceScheduleByTaskUid(taskUid: string) {
+  const db = await requireDb();
+  const result = await db
+    .select({ schedule: recurringInvoiceSchedules, company: companies, contact: contacts })
+    .from(recurringInvoiceSchedules)
+    .innerJoin(companies, eq(companies.id, recurringInvoiceSchedules.companyId))
+    .innerJoin(contacts, eq(contacts.id, recurringInvoiceSchedules.contactId))
+    .where(eq(recurringInvoiceSchedules.heartbeatTaskUid, taskUid))
+    .limit(1);
+  if (!result[0]) return null;
+  const lineItems = await db.select().from(recurringInvoiceLineItems).where(eq(recurringInvoiceLineItems.scheduleId, result[0].schedule.id)).orderBy(asc(recurringInvoiceLineItems.position));
+  return { ...result[0], lineItems };
+}
+
+export async function setRecurringInvoiceScheduleActive(companyId: number, scheduleId: number, isActive: boolean, nextRunAt?: Date | null) {
+  const db = await requireDb();
+  const result = await db.update(recurringInvoiceSchedules).set({ isActive, nextRunAt: nextRunAt ?? null }).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)));
+  if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Recurring schedule not found in this company");
+  return getRecurringInvoiceSchedule(companyId, scheduleId);
+}
+
+export async function deleteRecurringInvoiceSchedule(companyId: number, scheduleId: number) {
+  const db = await requireDb();
+  const result = await db.delete(recurringInvoiceSchedules).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)));
+  if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Recurring schedule not found in this company");
+}
+
+export function recurringOccurrenceKey(cadence: RecurringInvoiceCadence, executedAt = new Date()) {
+  if (cadence === "monthly") return `month-${executedAt.toISOString().slice(0, 7)}`;
+  const monday = new Date(Date.UTC(executedAt.getUTCFullYear(), executedAt.getUTCMonth(), executedAt.getUTCDate()));
+  const offset = (monday.getUTCDay() + 6) % 7;
+  monday.setUTCDate(monday.getUTCDate() - offset);
+  return `week-${monday.toISOString().slice(0, 10)}`;
+}
+
+const RECURRING_RUN_LEASE_MS = 5 * 60_000;
+
+export async function claimRecurringInvoiceRun(scheduleId: number, occurrenceKey: string) {
+  const db = await requireDb();
+  const now = new Date();
+  const leaseExpiresAt = new Date(now.getTime() + RECURRING_RUN_LEASE_MS);
+  try {
+    const insert = await db.insert(recurringInvoiceRuns).values({ scheduleId, occurrenceKey, status: "running", startedAt: now, leaseExpiresAt });
+    const run = (await db.select().from(recurringInvoiceRuns).where(eq(recurringInvoiceRuns.id, Number(insert[0].insertId))).limit(1))[0];
+    return { claimed: true, run };
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ER_DUP_ENTRY") throw error;
+    const run = (await db.select().from(recurringInvoiceRuns).where(and(eq(recurringInvoiceRuns.scheduleId, scheduleId), eq(recurringInvoiceRuns.occurrenceKey, occurrenceKey))).limit(1))[0];
+    if (!run) throw error;
+    if (run.status === "failed") {
+      const retry = await db.update(recurringInvoiceRuns).set({ status: "running", note: null, startedAt: now, leaseExpiresAt, completedAt: null }).where(and(eq(recurringInvoiceRuns.id, run.id), eq(recurringInvoiceRuns.status, "failed")));
+      if (Number((retry as any)[0]?.affectedRows ?? 0) === 1) {
+        const claimedRun = (await db.select().from(recurringInvoiceRuns).where(eq(recurringInvoiceRuns.id, run.id)).limit(1))[0];
+        return { claimed: true, run: claimedRun };
+      }
+    }
+    if (run.status === "running") {
+      const reclaim = await db.update(recurringInvoiceRuns).set({ note: "Recovered an expired execution lease.", startedAt: now, leaseExpiresAt, completedAt: null }).where(and(
+        eq(recurringInvoiceRuns.id, run.id),
+        eq(recurringInvoiceRuns.status, "running"),
+        sql`(${recurringInvoiceRuns.leaseExpiresAt} IS NULL OR ${recurringInvoiceRuns.leaseExpiresAt} <= ${now})`,
+      ));
+      if (Number((reclaim as any)[0]?.affectedRows ?? 0) === 1) {
+        const claimedRun = (await db.select().from(recurringInvoiceRuns).where(eq(recurringInvoiceRuns.id, run.id)).limit(1))[0];
+        return { claimed: true, run: claimedRun };
+      }
+    }
+    return { claimed: false, run };
+  }
+}
+
+export async function linkRecurringInvoiceRun(scheduleId: number, occurrenceKey: string, invoiceId: number) {
+  const db = await requireDb();
+  await db.update(recurringInvoiceRuns).set({ invoiceId }).where(and(
+    eq(recurringInvoiceRuns.scheduleId, scheduleId),
+    eq(recurringInvoiceRuns.occurrenceKey, occurrenceKey),
+    eq(recurringInvoiceRuns.status, "running"),
+  ));
+}
+
+export async function completeRecurringInvoiceRun(scheduleId: number, occurrenceKey: string, status: RecurringInvoiceRunStatus, input?: { invoiceId?: number | null; note?: string | null }) {
+  const db = await requireDb();
+  const update: { status: RecurringInvoiceRunStatus; note: string | null; completedAt: Date; leaseExpiresAt: null; invoiceId?: number | null } = {
+    status,
+    note: input?.note?.slice(0, 500) ?? null,
+    completedAt: new Date(),
+    leaseExpiresAt: null,
+  };
+  if (input && "invoiceId" in input) update.invoiceId = input.invoiceId ?? null;
+  await db.update(recurringInvoiceRuns).set(update).where(and(eq(recurringInvoiceRuns.scheduleId, scheduleId), eq(recurringInvoiceRuns.occurrenceKey, occurrenceKey)));
+}
+
+export async function recordRecurringInvoiceExecution(companyId: number, scheduleId: number, invoiceId: number, nextRunAt?: Date | null) {
+  const db = await requireDb();
+  const update: { lastRunAt: Date; lastInvoiceId: number; nextRunAt?: Date | null } = { lastRunAt: new Date(), lastInvoiceId: invoiceId };
+  if (nextRunAt !== undefined) update.nextRunAt = nextRunAt;
+  await db.update(recurringInvoiceSchedules).set(update).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)));
+}
+
+export async function getInvoiceByRecurringOccurrence(companyId: number, scheduleId: number, occurrenceKey: string) {
+  const db = await requireDb();
+  const invoice = (await db.select().from(invoices).where(and(
+    eq(invoices.companyId, companyId),
+    eq(invoices.recurringScheduleId, scheduleId),
+    eq(invoices.recurringOccurrenceKey, occurrenceKey),
+  )).limit(1))[0];
+  return invoice ? getInvoiceBundle(companyId, invoice.id) : null;
+}
+
 export async function getInvoiceBundle(companyId: number, invoiceId: number) {
   const db = await requireDb();
   const result = await db
@@ -346,6 +556,39 @@ export async function setInvoiceStatus(companyId: number, invoiceId: number, sta
   }).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId), eq(invoices.status, expectedCurrentStatus)));
   if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Invoice state changed before this action could be completed");
   return getInvoiceBundle(companyId, invoiceId);
+}
+
+/**
+ * Reserve a tenant-local document number only at the first send attempt. The
+ * conditional company counter update is retried under contention so parallel
+ * sends cannot receive the same number. A reserved number is never reclaimed.
+ */
+export async function allocateInvoiceNumberForSending(companyId: number, invoiceId: number) {
+  const db = await requireDb();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const allocation = await db.transaction(async tx => {
+      const invoice = (await tx.select().from(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId))).limit(1))[0];
+      if (!invoice) throw new Error("Invoice not found");
+      if (!isProvisionalInvoiceNumber(invoice.invoiceNumber)) return true;
+      if (invoice.status !== "sending") throw new Error("Invoice must be claimed for sending before a number is allocated");
+      const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+      if (!company) throw new Error("Company not found");
+      const nextSequence = company.invoiceSequence + 1;
+      const sequenceUpdate = await tx.update(companies).set({ invoiceSequence: nextSequence }).where(and(eq(companies.id, companyId), eq(companies.invoiceSequence, company.invoiceSequence)));
+      if (Number((sequenceUpdate as any)[0]?.affectedRows ?? 0) !== 1) return false;
+      const invoiceNumber = formatInvoiceNumber(company.invoicePrefix, invoice.issueDate, nextSequence);
+      const invoiceUpdate = await tx.update(invoices).set({ invoiceNumber }).where(and(
+        eq(invoices.id, invoiceId),
+        eq(invoices.companyId, companyId),
+        eq(invoices.status, "sending"),
+        eq(invoices.invoiceNumber, invoice.invoiceNumber),
+      ));
+      if (Number((invoiceUpdate as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Invoice changed before its number could be assigned");
+      return true;
+    });
+    if (allocation) return getInvoiceBundle(companyId, invoiceId);
+  }
+  throw new Error("Invoice number allocation was contended. Please retry the send.");
 }
 
 export async function getEmailProviderConfig(companyId: number) {
@@ -380,15 +623,72 @@ export async function createEmailLog(input: {
   bcc?: string | null;
   subject: string;
   correlationId: string;
+  attemptKey?: string | null;
 }) {
   const db = await requireDb();
-  const insert = await db.insert(emailLogs).values({ ...input, invoiceId: input.invoiceId ?? null, bcc: input.bcc ?? null, status: "queued" });
+  const insert = await db.insert(emailLogs).values({ ...input, invoiceId: input.invoiceId ?? null, bcc: input.bcc ?? null, attemptKey: input.attemptKey ?? null, status: "queued" });
   return Number(insert[0].insertId);
 }
 
-export async function completeEmailLog(logId: number, status: "sent" | "failed", responseSummary: string) {
+/** Create or re-open a known-safe pre-dispatch attempt. Uncertain outcomes are never re-opened automatically. */
+export async function startInvoiceDeliveryLog(input: {
+  companyId: number;
+  invoiceId: number;
+  provider: EmailProvider;
+  recipient: string;
+  bcc?: string | null;
+  subject: string;
+  correlationId: string;
+}) {
+  const db = await requireDb();
+  const attemptKey = `invoice-${input.invoiceId}`;
+  const existing = (await db.select().from(emailLogs).where(eq(emailLogs.attemptKey, attemptKey)).limit(1))[0];
+  if (existing) {
+    if (existing.status === "uncertain") throw new Error("Delivery outcome is uncertain. A company administrator must reconcile it before another provider request can be made.");
+    await db.update(emailLogs).set({
+      provider: input.provider,
+      recipient: input.recipient,
+      bcc: input.bcc ?? null,
+      subject: input.subject,
+      correlationId: input.correlationId,
+      status: "queued",
+      responseSummary: null,
+      sentAt: null,
+    }).where(eq(emailLogs.id, existing.id));
+    return existing.id;
+  }
+  try {
+    return await createEmailLog({ ...input, attemptKey });
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ER_DUP_ENTRY") throw error;
+    const raced = (await db.select().from(emailLogs).where(eq(emailLogs.attemptKey, attemptKey)).limit(1))[0];
+    if (!raced || raced.status === "uncertain") throw new Error("Delivery outcome is uncertain. A company administrator must reconcile it before another provider request can be made.");
+    return raced.id;
+  }
+}
+
+export async function completeEmailLog(logId: number, status: "sent" | "failed" | "uncertain", responseSummary: string) {
   const db = await requireDb();
   await db.update(emailLogs).set({ status, responseSummary: responseSummary.slice(0, 4000), ...(status === "sent" ? { sentAt: new Date() } : {}) }).where(eq(emailLogs.id, logId));
+}
+
+export async function reconcileUncertainInvoiceDelivery(companyId: number, invoiceId: number, resolution: "mark_sent" | "retry") {
+  const db = await requireDb();
+  await db.transaction(async tx => {
+    const invoice = (await tx.select().from(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId))).limit(1))[0];
+    if (!invoice || invoice.status !== "sending") throw new Error("Only a sending invoice with an uncertain delivery can be reconciled.");
+    const log = (await tx.select().from(emailLogs).where(eq(emailLogs.attemptKey, `invoice-${invoiceId}`)).limit(1))[0];
+    if (!log || log.status !== "uncertain") throw new Error("No uncertain provider attempt exists for this invoice.");
+    const now = new Date();
+    if (resolution === "mark_sent") {
+      await tx.update(invoices).set({ status: "sent", sentAt: now }).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId), eq(invoices.status, "sending")));
+      await tx.update(emailLogs).set({ status: "sent", sentAt: now, responseSummary: "Administrator reconciled the uncertain provider outcome as delivered." }).where(eq(emailLogs.id, log.id));
+    } else {
+      await tx.update(invoices).set({ status: "finalized" }).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId), eq(invoices.status, "sending")));
+      await tx.update(emailLogs).set({ status: "failed", responseSummary: "Administrator confirmed a retry is safe; no automatic resend was performed." }).where(eq(emailLogs.id, log.id));
+    }
+  });
+  return getInvoiceBundle(companyId, invoiceId);
 }
 
 export async function listEmailLogs(companyId: number) {

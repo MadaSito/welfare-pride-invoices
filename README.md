@@ -10,6 +10,8 @@ A secure, multi-tenant branded invoicing workspace for Welfare Pride and affilia
 - PDFKit-generated Letter-size PDFs using local Roboto fonts and bounded, aspect-ratio-safe logo fitting.
 - Tenant-controlled branding with protected PNG/JPEG uploads, invoice colors, footer text, BCC archive, logo scale, and logo alignment preview.
 - Administrator-selected Microsoft Graph or SMTP delivery, AES-256-GCM encrypted provider payloads, test delivery, PDF attachments, and durable email logs.
+- Weekly/monthly tenant-scoped recurring invoice templates with pause/resume/remove controls, UTC execution, review-first default behavior, and administrator-enabled auto-send through the selected provider.
+- Service-owned, idempotent platform-scheduler execution with recoverable run leases plus atomic company invoice numbering at first send (`PREFIX-YEAR-NNNN`); drafts do not consume financial numbers. Post-dispatch uncertainty is held for administrator reconciliation instead of being blindly resent.
 - Structured audit data, correlation identifiers, validated HMAC-SHA256 webhook receipts, replay window enforcement, and conservative API rate limiting.
 
 ## Local development
