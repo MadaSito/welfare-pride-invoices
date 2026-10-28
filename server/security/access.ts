@@ -1,6 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import type { CompanyMemberRole, User } from "../../drizzle/schema";
-import { getCompanyAccess } from "../db";
+import { getCompanyAccess, hasCompanyAdministratorMembership } from "../db";
 
 const ROLE_WEIGHT: Record<CompanyMemberRole, number> = {
   company_viewer: 1,
@@ -21,4 +21,10 @@ export function requirePlatformAdmin(user: User | null) {
   if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "Sign in is required." });
   if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Platform administrator access is required." });
   return user;
+}
+
+export async function requireCompanyProvisioner(user: User | null) {
+  if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "Sign in is required." });
+  if (user.role === "admin" || await hasCompanyAdministratorMembership(user.id)) return user;
+  throw new TRPCError({ code: "FORBIDDEN", message: "A company administrator role is required to provision another company." });
 }

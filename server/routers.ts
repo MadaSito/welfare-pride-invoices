@@ -36,7 +36,7 @@ import { escapeHtml, sendProviderEmail, testProviderConnection, type ProviderCon
 import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
-import { requireCompanyRole, requirePlatformAdmin } from "./security/access";
+import { requireCompanyProvisioner, requireCompanyRole } from "./security/access";
 
 const companyIdInput = z.object({ companyId: z.number().int().positive() });
 const color = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Use a six-digit hex color.");
@@ -137,13 +137,13 @@ export const appRouter = router({
       const companies = normalizedCompanies(await getCompaniesForUser(ctx.user));
       const activeCompany = companies[0] ?? null;
       const metrics = activeCompany ? await getDashboardMetrics(activeCompany.id) : null;
-      return { companies, activeCompany, metrics, isPlatformAdmin: ctx.user.role === "admin" };
+      return { companies, activeCompany, metrics, isPlatformAdmin: ctx.user.role === "admin" || companies.some(company => company.memberRole === "platform_admin") };
     }),
   }),
 
   company: router({
     create: protectedProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().email().optional() })).mutation(async ({ ctx, input }) => {
-      requirePlatformAdmin(ctx.user);
+      await requireCompanyProvisioner(ctx.user);
       const company = await createCompany({ name: input.name, email: input.email ?? null, createdByUserId: ctx.user.id });
       await audit(ctx, { companyId: company?.id, eventType: "company.created", resourceType: "company", resourceId: String(company?.id), outcome: "success" });
       return company;

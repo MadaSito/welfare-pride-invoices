@@ -128,6 +128,16 @@ export async function getCompanyAccess(user: User, companyId: number): Promise<C
   return member[0]?.role ?? null;
 }
 
+export async function hasCompanyAdministratorMembership(userId: number) {
+  const db = await requireDb();
+  const member = await db
+    .select({ id: companyMembers.id })
+    .from(companyMembers)
+    .where(and(eq(companyMembers.userId, userId), eq(companyMembers.role, "platform_admin")))
+    .limit(1);
+  return member.length > 0;
+}
+
 export async function createCompany(input: { name: string; email?: string | null; createdByUserId: number }) {
   const db = await requireDb();
   const slugBase = input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 90) || "company";

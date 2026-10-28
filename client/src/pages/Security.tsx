@@ -3,9 +3,11 @@ import { trpc } from "@/lib/trpc";
 import { Building2, KeyRound, LockKeyhole, Plus, ShieldCheck, UsersRound, Webhook } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { useLocation } from "wouter";
 
 export default function Security() {
-  const { activeCompany, isPlatformAdmin, refresh } = useWorkspace();
+  const { activeCompany, isPlatformAdmin, refresh, setActiveCompanyId } = useWorkspace();
+  const [, setLocation] = useLocation();
   const utils = trpc.useUtils();
   const canAdminister = isPlatformAdmin || activeCompany?.memberRole === "platform_admin";
   const members = trpc.company.members.useQuery({ companyId: activeCompany?.id ?? 0 }, { enabled: Boolean(activeCompany && canAdminister) });
@@ -13,7 +15,7 @@ export default function Security() {
   const [role, setRole] = useState<"platform_admin" | "company_creator" | "company_viewer">("company_creator");
   const [companyName, setCompanyName] = useState("");
   const assign = trpc.company.assignMember.useMutation({ onSuccess: () => { toast.success("Company role assigned."); setEmail(""); utils.company.members.invalidate(); }, onError: error => toast.error(error.message) });
-  const createCompany = trpc.company.create.useMutation({ onSuccess: async () => { toast.success("Company provisioned with its own tenant boundary."); setCompanyName(""); await refresh(); }, onError: error => toast.error(error.message) });
+  const createCompany = trpc.company.create.useMutation({ onSuccess: async company => { setCompanyName(""); await refresh(); if (company?.id) { setActiveCompanyId(company.id); setLocation("/branding"); } toast.success("Company provisioned. Configure its branding next."); }, onError: error => toast.error(error.message) });
   if (!activeCompany) return <div className="empty-state"><ShieldCheck size={30} /><h3>No active company</h3><p>Security and access settings require a company role.</p></div>;
   if (!canAdminister) return <div className="empty-state"><LockKeyhole size={30} /><h3>Administrator access required</h3><p>Only company administrators can assign company roles and inspect access safeguards.</p></div>;
   return <>
