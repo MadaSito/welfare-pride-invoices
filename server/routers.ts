@@ -28,6 +28,7 @@ import {
   reconcileUncertainInvoiceDelivery,
   setRecurringInvoiceScheduleActive,
   saveEmailProviderConfig,
+  setCompanyInvoiceSequence,
   setCompanyLogoKey,
   setInvoiceStatus,
   updateContact,
@@ -209,6 +210,23 @@ export const appRouter = router({
       const company = await updateCompanyBranding(companyId, update);
       await audit(ctx, { companyId, eventType: "company.branding.updated", resourceType: "company", resourceId: String(companyId), outcome: "success" });
       return company;
+    }),
+    setInvoiceSequence: protectedProcedure.input(companyIdInput.extend({ nextSequence: z.number().int().min(1).max(99_999_999) })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const result = await setCompanyInvoiceSequence(input.companyId, input.nextSequence);
+        await audit(ctx, {
+          companyId: input.companyId,
+          eventType: "company.invoice_sequence.migrated",
+          resourceType: "company",
+          resourceId: String(input.companyId),
+          outcome: "success",
+          metadata: { previousNextSequence: result.previousSequence, nextSequence: input.nextSequence, hasAllocatedInvoice: result.hasAllocatedInvoice },
+        });
+        return result.company;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The invoice sequence could not be updated." });
+      }
     }),
     uploadLogo: protectedProcedure.input(companyIdInput.extend({ base64: z.string().min(1).max(7_000_000), mimeType: z.enum(["image/png", "image/jpeg"]) })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");

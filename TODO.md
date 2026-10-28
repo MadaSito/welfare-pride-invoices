@@ -37,6 +37,7 @@
   - Allow an explicit automatic-delivery option only when a tenant has an active protected Graph or SMTP configuration; otherwise create the scheduled invoice as finalized and ready for manual review/send.
   - Use the platform-owned authenticated scheduler callback, resolve schedules only from the platform-issued task UID, validate tenant ownership server-side, and persist a unique run occurrence with a recoverable lease and durable invoice link so retries or interruption cannot create or send a duplicate invoice.
   - Do not consume a financial invoice number for a draft or merely finalized document. At the first send attempt, atomically allocate the next company-scoped incremental number in `PREFIX-YEAR-NNNN` form. Manual and scheduled sends use the same allocator; the durable outbox is marked uncertain before provider dispatch and blocks automatic resend until an administrator reconciles it, while a number is never reused.
+  - Let a company administrator securely set the next invoice sequence during migration from a prior system (for example, `2501` after external invoice `2500`). Persist only the next number, require a positive bounded value, audit the change, and block moving backward after this company has allocated financial invoice numbers.
   - Record schedule creation, updates, executions, invoice creation, delivery outcomes, and safe failures in the existing audit trail. Document deployment and publish prerequisites for the platform scheduler.
 
 - [x] **Quality, delivery, and GitHub source transfer**

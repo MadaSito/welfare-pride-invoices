@@ -185,6 +185,38 @@ export async function updateCompanyBranding(companyId: number, input: {
   return getCompanyById(companyId);
 }
 
+/**
+ * Sets the number that will be issued on the next successful send. A company
+ * with no locally allocated financial document may choose any positive start;
+ * once a real number exists, the counter may only stay put or advance.
+ */
+export async function setCompanyInvoiceSequence(companyId: number, nextSequence: number) {
+  const db = await requireDb();
+  return db.transaction(async tx => {
+    const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+    if (!company) throw new Error("Company not found");
+    const allocatedInvoice = (await tx.select({ id: invoices.id }).from(invoices).where(and(
+      eq(invoices.companyId, companyId),
+      sql`${invoices.invoiceNumber} NOT LIKE 'DRAFT-%'`,
+    )).limit(1))[0];
+    if (allocatedInvoice && nextSequence < company.invoiceSequence) {
+      throw new Error(`The next sequence cannot move backward from ${company.invoiceSequence} after this company has issued invoice numbers.`);
+    }
+    const updated = await tx.update(companies).set({ invoiceSequence: nextSequence }).where(and(
+      eq(companies.id, companyId),
+      sql`${companies.invoiceSequence} = ${company.invoiceSequence}`,
+    ));
+    if (Number((updated as any)[0]?.affectedRows ?? 0) !== 1) {
+      throw new Error("The invoice sequence changed concurrently. Refresh and try again.");
+    }
+    return {
+      company: (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0],
+      previousSequence: company.invoiceSequence,
+      hasAllocatedInvoice: Boolean(allocatedInvoice),
+    };
+  });
+}
+
 export async function setCompanyLogoKey(companyId: number, logoKey: string) {
   const db = await requireDb();
   await db.update(companies).set({ logoKey }).where(eq(companies.id, companyId));

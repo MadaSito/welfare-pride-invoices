@@ -1,6 +1,6 @@
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { trpc } from "@/lib/trpc";
-import { AlertTriangle, ImageUp, MapPin, Palette, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Hash, ImageUp, MapPin, Palette, Save, ShieldCheck } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -48,11 +48,26 @@ export default function Branding() {
   const utils = trpc.useUtils();
   const query = trpc.company.get.useQuery({ companyId: activeCompany?.id ?? 0 }, { enabled: Boolean(activeCompany) });
   const [form, setForm] = useState<BrandForm>(blank);
-  useEffect(() => { if (query.data) setForm(fromCompany(query.data)); }, [query.data]);
+  const [nextSequence, setNextSequence] = useState("1000");
+  useEffect(() => {
+    if (query.data) {
+      setForm(fromCompany(query.data));
+      setNextSequence(String(query.data.invoiceSequence ?? 1000));
+    }
+  }, [query.data]);
   const canAdminister = isPlatformAdmin || activeCompany?.memberRole === "platform_admin";
   const addressLines = useMemo(() => senderAddressLines(form), [form]);
   const update = trpc.company.updateBranding.useMutation({
     onSuccess: async () => { toast.success("Company identity and invoicing address saved."); await refresh(); utils.company.get.invalidate(); },
+    onError: error => toast.error(error.message),
+  });
+  const updateSequence = trpc.company.setInvoiceSequence.useMutation({
+    onSuccess: async company => {
+      setNextSequence(String(company.invoiceSequence));
+      toast.success(`Next invoice sequence set to ${company.invoiceSequence}.`);
+      await refresh();
+      utils.company.get.invalidate();
+    },
     onError: error => toast.error(error.message),
   });
   const upload = trpc.company.uploadLogo.useMutation({
@@ -79,6 +94,17 @@ export default function Branding() {
     footerText: form.footerText || null,
     defaultBcc: form.defaultBcc || null,
   });
+
+  const saveNextSequence = () => {
+    const parsed = Number(nextSequence);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 99_999_999) {
+      toast.error("Enter a whole next invoice number between 1 and 99,999,999.");
+      return;
+    }
+    if (window.confirm(`Set ${parsed} as the next invoice sequence? This does not change existing invoices.`)) {
+      updateSequence.mutate({ companyId: activeCompany.id, nextSequence: parsed });
+    }
+  };
 
   const selectLogo = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -129,6 +155,15 @@ export default function Branding() {
             </div>
             <div className="invoice-address-preview" aria-live="polite"><div><MapPin size={17} /><span>Invoice From preview</span></div><strong>{form.legalName || form.name || "Your company name"}</strong>{addressLines.length ? <p>{addressLines.map(line => <span key={line}>{line}</span>)}</p> : <p className="address-preview-empty">Enter the business address above to show it on your invoices.</p>}{(form.email || form.phone) && <small>{[form.email, form.phone].filter(Boolean).join(" · ")}</small>}</div>
           </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header"><div><h2>Invoice numbering migration</h2><p>Continue your existing invoice sequence when moving records from another system.</p></div></div>
+          <div className="panel-body"><div className="sequence-migration">
+            <div className="sequence-migration-icon"><Hash size={18} /></div>
+            <div className="sequence-migration-copy"><strong>Next sent-invoice sequence</strong><p>If your last external invoice was <code>{form.invoicePrefix || "INV"}-{new Date().getUTCFullYear()}-2500</code>, enter <strong>2501</strong>. The next invoice actually sent from this company will receive that number.</p><small>Drafts and finalized review documents do not use this number. Once this company has issued local financial numbers, the setting can only stay the same or move forward.</small></div>
+            <div className="sequence-migration-control"><label htmlFor="next-invoice-sequence">Next sequence</label><div><input id="next-invoice-sequence" className="field-input" type="number" min="1" max="99999999" inputMode="numeric" value={nextSequence} onChange={event => setNextSequence(event.target.value)} /><button className="button button-secondary" disabled={updateSequence.isPending} onClick={saveNextSequence}>{updateSequence.isPending ? "Saving…" : "Save next number"}</button></div></div>
+          </div></div>
         </section>
 
         <section className="panel">
