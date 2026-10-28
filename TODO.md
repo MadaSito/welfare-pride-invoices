@@ -12,6 +12,7 @@
 
 - [x] **Companies, branding, contacts, and logo fitting**
   - Let administrators manage company contact details, invoice footer, primary/accent colors, default BCC archive address, address-book contacts, and document branding.
+  - Provide a dedicated company-administrator invoicing-address editor with a live From-block preview; securely persist street, locality, region, postal code, and country and render the saved address on newly generated invoice PDFs.
   - Let administrators upload a company logo only after validated authorization, image type, byte size, and dimensions checks. Store it under a non-guessable tenant-prefixed key and retain its ownership record.
   - Provide controls and a live invoice-header preview for logo scale and alignment. Render every invoice logo with aspect ratio preserved in a bounded contain box so it cannot be stretched, cropped, or oversized.
 

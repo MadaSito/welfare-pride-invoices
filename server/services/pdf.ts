@@ -68,7 +68,12 @@ function money(cents: number, currency: string) {
 
 function addressLines(entity: { addressLine1: string | null; addressLine2: string | null; city: string | null; region: string | null; postalCode: string | null; country: string | null }) {
   const cityLine = [entity.city, entity.region, entity.postalCode].filter(Boolean).join(", ").replace(/, ([^,]+)$/, " $1");
-  return [entity.addressLine1, entity.addressLine2, cityLine, entity.country].map(clean).filter(Boolean);
+  const countryCode = clean(entity.country).toUpperCase();
+  let country = countryCode;
+  if (/^[A-Z]{2}$/.test(countryCode)) {
+    try { country = new Intl.DisplayNames(["en"], { type: "region" }).of(countryCode) || countryCode; } catch { /* Retain a valid stored code if the runtime cannot expand it. */ }
+  }
+  return [entity.addressLine1, entity.addressLine2, cityLine, country].map(clean).filter(Boolean);
 }
 
 function fontPath(name: string) {
