@@ -102,9 +102,10 @@ export const recurringInvoiceSchedules = mysqlTable(
     companyId: int("companyId").notNull().references(() => companies.id, { onDelete: "cascade" }),
     contactId: int("contactId").notNull().references(() => contacts.id),
     name: varchar("name", { length: 160 }).notNull(),
-    cadence: mysqlEnum("cadence", ["weekly", "monthly"]).notNull(),
+    cadence: mysqlEnum("cadence", ["daily", "weekly", "monthly", "semiannual", "yearly"]).notNull(),
     dayOfWeek: int("dayOfWeek"),
     dayOfMonth: int("dayOfMonth"),
+    monthOfYear: int("monthOfYear"),
     hourUtc: int("hourUtc").default(9).notNull(),
     minuteUtc: int("minuteUtc").default(0).notNull(),
     dueDays: int("dueDays").default(30).notNull(),
@@ -306,5 +307,5 @@ export type Company = typeof companies.$inferSelect;
 export type CompanyMemberRole = "platform_admin" | "company_creator" | "company_viewer";
 export type InvoiceStatus = "draft" | "finalized" | "sending" | "sent" | "paid" | "void";
 export type EmailProvider = "microsoft_graph" | "smtp";
-export type RecurringInvoiceCadence = "weekly" | "monthly";
+export type RecurringInvoiceCadence = "daily" | "weekly" | "monthly" | "semiannual" | "yearly";
 export type RecurringInvoiceRunStatus = "running" | "created" | "sent" | "failed" | "uncertain";

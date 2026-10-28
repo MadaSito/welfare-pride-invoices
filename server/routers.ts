@@ -81,9 +81,10 @@ const recurringInvoiceInput = z.object({
   contactId: z.number().int().positive(),
   invoicePrefix: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,24}$/, "Use 1–24 letters or numbers for the recurring invoice prefix.").refine(value => value !== "DRAFT", "DRAFT is reserved for provisional documents."),
   nextInvoiceSequence: z.number().int().min(1).max(99_999_999),
-  cadence: z.enum(["weekly", "monthly"]),
+  cadence: z.enum(["daily", "weekly", "monthly", "semiannual", "yearly"]),
   dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
   dayOfMonth: z.number().int().min(1).max(28).optional().nullable(),
+  monthOfYear: z.number().int().min(1).max(12).optional().nullable(),
   hourUtc: z.number().int().min(0).max(23),
   minuteUtc: z.number().int().min(0).max(59),
   dueDays: z.number().int().min(0).max(365),
@@ -96,8 +97,27 @@ const recurringInvoiceInput = z.object({
   paymentInstructions: optionalText(4000),
   lineItems: z.array(lineItemInput).min(1).max(100),
 }).superRefine((value, ctx) => {
-  if (value.cadence === "weekly" && value.dayOfWeek == null) ctx.addIssue({ code: "custom", path: ["dayOfWeek"], message: "Choose a day of week for a weekly schedule." });
-  if (value.cadence === "monthly" && value.dayOfMonth == null) ctx.addIssue({ code: "custom", path: ["dayOfMonth"], message: "Choose a day of month for a monthly schedule." });
+  if (value.cadence === "weekly") {
+    if (value.dayOfWeek == null) ctx.addIssue({ code: "custom", path: ["dayOfWeek"], message: "Choose a day of week for a weekly schedule." });
+    if (value.dayOfMonth != null || value.monthOfYear != null) ctx.addIssue({ code: "custom", path: ["cadence"], message: "Weekly schedules cannot include monthly anchors." });
+  }
+  if (value.cadence === "monthly") {
+    if (value.dayOfMonth == null) ctx.addIssue({ code: "custom", path: ["dayOfMonth"], message: "Choose a day of month for a monthly schedule." });
+    if (value.dayOfWeek != null || value.monthOfYear != null) ctx.addIssue({ code: "custom", path: ["cadence"], message: "Monthly schedules cannot include weekly or yearly anchors." });
+  }
+  if (value.cadence === "semiannual") {
+    if (value.dayOfMonth == null) ctx.addIssue({ code: "custom", path: ["dayOfMonth"], message: "Choose a day of month for an every-six-months schedule." });
+    if (value.monthOfYear == null || value.monthOfYear > 6) ctx.addIssue({ code: "custom", path: ["monthOfYear"], message: "Choose an anchor month from January through June for an every-six-months schedule." });
+    if (value.dayOfWeek != null) ctx.addIssue({ code: "custom", path: ["cadence"], message: "Every-six-months schedules cannot include a weekly anchor." });
+  }
+  if (value.cadence === "yearly") {
+    if (value.dayOfMonth == null) ctx.addIssue({ code: "custom", path: ["dayOfMonth"], message: "Choose a day of month for a yearly schedule." });
+    if (value.monthOfYear == null) ctx.addIssue({ code: "custom", path: ["monthOfYear"], message: "Choose a month for a yearly schedule." });
+    if (value.dayOfWeek != null) ctx.addIssue({ code: "custom", path: ["cadence"], message: "Yearly schedules cannot include a weekly anchor." });
+  }
+  if (value.cadence === "daily" && (value.dayOfWeek != null || value.dayOfMonth != null || value.monthOfYear != null)) {
+    ctx.addIssue({ code: "custom", path: ["cadence"], message: "Daily schedules cannot include a weekly or monthly anchor." });
+  }
 });
 
 const graphConfigInput = z.object({
@@ -161,9 +181,14 @@ function assertInvoiceDates(input: z.infer<typeof invoiceInput>) {
 
 function recurrenceCron(input: z.infer<typeof recurringInvoiceInput>) {
   const seconds = 0;
-  return input.cadence === "weekly"
-    ? `${seconds} ${input.minuteUtc} ${input.hourUtc} * * ${input.dayOfWeek}`
-    : `${seconds} ${input.minuteUtc} ${input.hourUtc} ${input.dayOfMonth} * *`;
+  if (input.cadence === "daily") return `${seconds} ${input.minuteUtc} ${input.hourUtc} * * *`;
+  if (input.cadence === "weekly") return `${seconds} ${input.minuteUtc} ${input.hourUtc} * * ${input.dayOfWeek}`;
+  if (input.cadence === "monthly") return `${seconds} ${input.minuteUtc} ${input.hourUtc} ${input.dayOfMonth} * *`;
+  if (input.cadence === "semiannual") {
+    const firstMonth = input.monthOfYear!;
+    return `${seconds} ${input.minuteUtc} ${input.hourUtc} ${input.dayOfMonth} ${firstMonth},${firstMonth + 6} *`;
+  }
+  return `${seconds} ${input.minuteUtc} ${input.hourUtc} ${input.dayOfMonth} ${input.monthOfYear} *`;
 }
 
 function nextRunDate(value?: string | null) {

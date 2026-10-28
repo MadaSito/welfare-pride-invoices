@@ -319,6 +319,15 @@ export async function createInvoice(companyId: number, createdByUserId: number, 
   await db.transaction(async tx => {
     const activeCompany = await tx.update(companies).set({ updatedAt: new Date() }).where(and(eq(companies.id, companyId), isNull(companies.archivedAt)));
     if (Number((activeCompany as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("This company is archived or no longer available for invoice creation.");
+    if (input.recurringScheduleId) {
+      const activeSchedule = await tx.update(recurringInvoiceSchedules).set({ updatedAt: new Date() }).where(and(
+        eq(recurringInvoiceSchedules.id, input.recurringScheduleId),
+        eq(recurringInvoiceSchedules.companyId, companyId),
+        eq(recurringInvoiceSchedules.isActive, true),
+        isNull(recurringInvoiceSchedules.archivedAt),
+      ));
+      if (Number((activeSchedule as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("This recurring schedule is paused or archived and cannot create an invoice.");
+    }
     const client = (await tx.select().from(contacts).where(and(eq(contacts.id, input.contactId), eq(contacts.companyId, companyId))).limit(1))[0];
     if (!client) throw new Error("Client does not belong to this company");
     const insert = await tx.insert(invoices).values({
@@ -420,6 +429,7 @@ export type RecurringInvoiceTemplateInput = {
   cadence: RecurringInvoiceCadence;
   dayOfWeek?: number | null;
   dayOfMonth?: number | null;
+  monthOfYear?: number | null;
   hourUtc: number;
   minuteUtc: number;
   dueDays: number;
@@ -466,6 +476,7 @@ export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemp
       cadence: input.cadence,
       dayOfWeek: input.dayOfWeek ?? null,
       dayOfMonth: input.dayOfMonth ?? null,
+      monthOfYear: input.monthOfYear ?? null,
       hourUtc: input.hourUtc,
       minuteUtc: input.minuteUtc,
       dueDays: input.dueDays,
@@ -600,6 +611,9 @@ export async function deleteRecurringInvoiceSchedule(companyId: number, schedule
 }
 
 export function recurringOccurrenceKey(cadence: RecurringInvoiceCadence, executedAt = new Date()) {
+  if (cadence === "daily") return `day-${executedAt.toISOString().slice(0, 10)}`;
+  if (cadence === "yearly") return `year-${executedAt.getUTCFullYear()}`;
+  if (cadence === "semiannual") return `half-${executedAt.getUTCFullYear()}-${String(executedAt.getUTCMonth() + 1).padStart(2, "0")}`;
   if (cadence === "monthly") return `month-${executedAt.toISOString().slice(0, 7)}`;
   const monday = new Date(Date.UTC(executedAt.getUTCFullYear(), executedAt.getUTCMonth(), executedAt.getUTCDate()));
   const offset = (monday.getUTCDay() + 6) % 7;
@@ -668,7 +682,12 @@ export async function recordRecurringInvoiceExecution(companyId: number, schedul
   const db = await requireDb();
   const update: { lastRunAt: Date; lastInvoiceId: number; nextRunAt?: Date | null } = { lastRunAt: new Date(), lastInvoiceId: invoiceId };
   if (nextRunAt !== undefined) update.nextRunAt = nextRunAt;
-  await db.update(recurringInvoiceSchedules).set(update).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)));
+  await db.update(recurringInvoiceSchedules).set(update).where(and(
+    eq(recurringInvoiceSchedules.companyId, companyId),
+    eq(recurringInvoiceSchedules.id, scheduleId),
+    eq(recurringInvoiceSchedules.isActive, true),
+    isNull(recurringInvoiceSchedules.archivedAt),
+  ));
 }
 
 export async function getInvoiceByRecurringOccurrence(companyId: number, scheduleId: number, occurrenceKey: string) {

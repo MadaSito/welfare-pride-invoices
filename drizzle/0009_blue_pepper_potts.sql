@@ -1,0 +1,2 @@
+ALTER TABLE `recurring_invoice_schedules` MODIFY COLUMN `cadence` enum('daily','weekly','monthly','semiannual','yearly') NOT NULL;--> statement-breakpoint
+ALTER TABLE `recurring_invoice_schedules` ADD `monthOfYear` int;

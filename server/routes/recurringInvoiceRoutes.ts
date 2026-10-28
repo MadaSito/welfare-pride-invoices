@@ -24,16 +24,39 @@ function dueDateFrom(issueDate: Date, dueDays: number) {
   return due;
 }
 
-function nextScheduledRunAt(schedule: { cadence: "weekly" | "monthly"; dayOfWeek: number | null; dayOfMonth: number | null; hourUtc: number; minuteUtc: number }, after = new Date()) {
+export function nextScheduledRunAt(schedule: { cadence: "daily" | "weekly" | "monthly" | "semiannual" | "yearly"; dayOfWeek: number | null; dayOfMonth: number | null; monthOfYear: number | null; hourUtc: number; minuteUtc: number }, after = new Date()) {
+  if (schedule.cadence === "daily") {
+    const target = new Date(Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), after.getUTCDate(), schedule.hourUtc, schedule.minuteUtc));
+    if (target.getTime() <= after.getTime()) target.setUTCDate(target.getUTCDate() + 1);
+    return target;
+  }
   if (schedule.cadence === "weekly") {
     const target = new Date(Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), after.getUTCDate(), schedule.hourUtc, schedule.minuteUtc));
     target.setUTCDate(target.getUTCDate() + ((schedule.dayOfWeek ?? 0) - target.getUTCDay() + 7) % 7);
     if (target.getTime() <= after.getTime()) target.setUTCDate(target.getUTCDate() + 7);
     return target;
   }
-  const target = new Date(Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), schedule.dayOfMonth ?? 1, schedule.hourUtc, schedule.minuteUtc));
-  if (target.getTime() <= after.getTime()) target.setUTCMonth(target.getUTCMonth() + 1);
+  if (schedule.cadence === "monthly") {
+    const target = new Date(Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), schedule.dayOfMonth ?? 1, schedule.hourUtc, schedule.minuteUtc));
+    if (target.getTime() <= after.getTime()) target.setUTCMonth(target.getUTCMonth() + 1);
+    return target;
+  }
+  if (schedule.cadence === "yearly") {
+    const target = new Date(Date.UTC(after.getUTCFullYear(), (schedule.monthOfYear ?? 1) - 1, schedule.dayOfMonth ?? 1, schedule.hourUtc, schedule.minuteUtc));
+    if (target.getTime() <= after.getTime()) target.setUTCFullYear(target.getUTCFullYear() + 1);
+    return target;
+  }
+  const firstMonth = (schedule.monthOfYear ?? 1) - 1;
+  const candidates = [after.getUTCFullYear(), after.getUTCFullYear() + 1].flatMap(year => [firstMonth, firstMonth + 6].map(month => new Date(Date.UTC(year, month, schedule.dayOfMonth ?? 1, schedule.hourUtc, schedule.minuteUtc))));
+  const target = candidates.filter(candidate => candidate.getTime() > after.getTime()).sort((left, right) => left.getTime() - right.getTime())[0];
+  if (!target) throw new Error("Could not calculate the next semiannual schedule run.");
   return target;
+}
+
+export function nextFutureScheduledRunAt(schedule: Parameters<typeof nextScheduledRunAt>[0], scheduledAt: Date, now = new Date()) {
+  let next = nextScheduledRunAt(schedule, scheduledAt);
+  while (next.getTime() <= now.getTime()) next = nextScheduledRunAt(schedule, next);
+  return next;
 }
 
 /**
@@ -79,7 +102,10 @@ export function registerRecurringInvoiceScheduledRoutes(app: Express) {
         return;
       }
 
-      occurrenceKey = recurringOccurrenceKey(schedule.cadence);
+      // Persisted nextRunAt is the scheduler-selected occurrence. It remains the
+      // idempotency anchor if a platform callback arrives late or is retried.
+      const scheduledAt = schedule.nextRunAt ?? new Date();
+      occurrenceKey = recurringOccurrenceKey(schedule.cadence, scheduledAt);
       const claim = await claimRecurringInvoiceRun(schedule.id, occurrenceKey);
       if (!claim.claimed) {
         if (claim.run.status === "running") {
@@ -92,7 +118,7 @@ export function registerRecurringInvoiceScheduledRoutes(app: Express) {
 
       let invoice = await getInvoiceByRecurringOccurrence(schedule.companyId, schedule.id, occurrenceKey);
       if (!invoice) {
-        const issueDate = new Date();
+        const issueDate = scheduledAt;
         invoice = await createInvoice(schedule.companyId, schedule.createdByUserId, {
           contactId: schedule.contactId,
           currency: schedule.currency,
@@ -117,7 +143,7 @@ export function registerRecurringInvoiceScheduledRoutes(app: Express) {
       if (!invoice) throw new Error("Recurring invoice creation did not return a document.");
 
       await linkRecurringInvoiceRun(schedule.id, occurrenceKey, invoice.invoice.id);
-      await recordRecurringInvoiceExecution(schedule.companyId, schedule.id, invoice.invoice.id, nextScheduledRunAt(schedule));
+      await recordRecurringInvoiceExecution(schedule.companyId, schedule.id, invoice.invoice.id, nextFutureScheduledRunAt(schedule, scheduledAt));
       if (!schedule.autoSend) {
         await completeRecurringInvoiceRun(schedule.id, occurrenceKey, "created", { invoiceId: invoice.invoice.id, note: "Finalized for manual review and send." });
         await createAuditLog({ companyId: schedule.companyId, actorUserId: schedule.createdByUserId, eventType: "recurring_invoice.created", resourceType: "invoice", resourceId: String(invoice.invoice.id), outcome: "success", correlationId: id, metadata: { scheduleId: schedule.id, occurrenceKey, autoSend: false } });

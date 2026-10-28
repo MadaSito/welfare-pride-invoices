@@ -30,9 +30,12 @@ describe("sent invoice numbering and recurrence keys", () => {
     expect(isProvisionalInvoiceNumber("WP-2026-1001")).toBe(false);
   });
 
-  it("uses one idempotency occurrence key per UTC weekly or monthly period", () => {
+  it("uses one idempotency occurrence key for every supported UTC recurrence cadence", () => {
+    expect(recurringOccurrenceKey("daily", new Date("2026-10-28T09:00:00Z"))).toBe("day-2026-10-28");
     expect(recurringOccurrenceKey("weekly", new Date("2026-10-28T09:00:00Z"))).toBe("week-2026-10-26");
     expect(recurringOccurrenceKey("monthly", new Date("2026-10-28T09:00:00Z"))).toBe("month-2026-10");
+    expect(recurringOccurrenceKey("semiannual", new Date("2026-07-28T09:00:00Z"))).toBe("half-2026-07");
+    expect(recurringOccurrenceKey("yearly", new Date("2026-10-28T09:00:00Z"))).toBe("year-2026");
   });
 });
 
