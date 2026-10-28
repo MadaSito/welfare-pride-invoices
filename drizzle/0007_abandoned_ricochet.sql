@@ -1,0 +1,1 @@
+ALTER TABLE `recurring_invoice_schedules` ADD `archivedAt` timestamp;

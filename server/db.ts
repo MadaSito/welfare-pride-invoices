@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { nanoid } from "nanoid";
 import {
@@ -185,38 +185,6 @@ export async function updateCompanyBranding(companyId: number, input: {
   return getCompanyById(companyId);
 }
 
-/**
- * Sets the number that will be issued on the next successful send. A company
- * with no locally allocated financial document may choose any positive start;
- * once a real number exists, the counter may only stay put or advance.
- */
-export async function setCompanyInvoiceSequence(companyId: number, nextSequence: number) {
-  const db = await requireDb();
-  return db.transaction(async tx => {
-    const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
-    if (!company) throw new Error("Company not found");
-    const allocatedInvoice = (await tx.select({ id: invoices.id }).from(invoices).where(and(
-      eq(invoices.companyId, companyId),
-      sql`${invoices.invoiceNumber} NOT LIKE 'DRAFT-%'`,
-    )).limit(1))[0];
-    if (allocatedInvoice && nextSequence < company.invoiceSequence) {
-      throw new Error(`The next sequence cannot move backward from ${company.invoiceSequence} after this company has issued invoice numbers.`);
-    }
-    const updated = await tx.update(companies).set({ invoiceSequence: nextSequence }).where(and(
-      eq(companies.id, companyId),
-      sql`${companies.invoiceSequence} = ${company.invoiceSequence}`,
-    ));
-    if (Number((updated as any)[0]?.affectedRows ?? 0) !== 1) {
-      throw new Error("The invoice sequence changed concurrently. Refresh and try again.");
-    }
-    return {
-      company: (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0],
-      previousSequence: company.invoiceSequence,
-      hasAllocatedInvoice: Boolean(allocatedInvoice),
-    };
-  });
-}
-
 export async function setCompanyLogoKey(companyId: number, logoKey: string) {
   const db = await requireDb();
   await db.update(companies).set({ logoKey }).where(eq(companies.id, companyId));
@@ -274,6 +242,11 @@ export function isProvisionalInvoiceNumber(invoiceNumber: string) {
 
 export function formatInvoiceNumber(prefix: string, issuedAt: Date, sequence: number) {
   return `${prefix || "INV"}-${issuedAt.getUTCFullYear()}-${String(sequence).padStart(4, "0")}`;
+}
+
+/** Recurring templates own their invoice series, e.g. HPP + 35 becomes HPP035. */
+export function formatRecurringInvoiceNumber(prefix: string, sequence: number) {
+  return `${prefix || "REC"}${String(sequence).padStart(3, "0")}`;
 }
 
 export async function createInvoice(companyId: number, createdByUserId: number, input: {
@@ -377,6 +350,8 @@ export async function listInvoices(companyId: number) {
 export type RecurringInvoiceTemplateInput = {
   contactId: number;
   name: string;
+  invoicePrefix: string;
+  nextInvoiceSequence: number;
   cadence: RecurringInvoiceCadence;
   dayOfWeek?: number | null;
   dayOfMonth?: number | null;
@@ -393,6 +368,10 @@ export type RecurringInvoiceTemplateInput = {
   lineItems: InvoiceLineInput[];
 };
 
+export function hasRecurringSeriesPrefixConflict(existingPrefixes: string[], candidate: string) {
+  return existingPrefixes.some(prefix => prefix === candidate || prefix.startsWith(candidate) || candidate.startsWith(prefix));
+}
+
 export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemplateInput & {
   companyId: number;
   createdByUserId: number;
@@ -404,6 +383,17 @@ export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemp
   if (!contact) throw new Error("Client does not belong to this company");
   let scheduleId = 0;
   await db.transaction(async tx => {
+    const prefix = input.invoicePrefix.toUpperCase();
+    const existingSeries = await tx.select({ invoicePrefix: recurringInvoiceSchedules.invoicePrefix }).from(recurringInvoiceSchedules).where(eq(recurringInvoiceSchedules.companyId, input.companyId));
+    if (hasRecurringSeriesPrefixConflict(existingSeries.map(series => series.invoicePrefix), prefix)) {
+      throw new Error("Another recurring schedule uses a prefix that could produce the same invoice number. Choose a distinct, non-overlapping series prefix.");
+    }
+    const candidateNumber = formatRecurringInvoiceNumber(prefix, input.nextInvoiceSequence);
+    const existingInvoiceNumber = (await tx.select({ id: invoices.id }).from(invoices).where(and(
+      eq(invoices.companyId, input.companyId),
+      eq(invoices.invoiceNumber, candidateNumber),
+    )).limit(1))[0];
+    if (existingInvoiceNumber) throw new Error(`Invoice number ${candidateNumber} already exists in this company. Choose the next unused number.`);
     const insert = await tx.insert(recurringInvoiceSchedules).values({
       companyId: input.companyId,
       contactId: input.contactId,
@@ -418,6 +408,8 @@ export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemp
       heartbeatTaskUid: input.heartbeatTaskUid,
       nextRunAt: input.nextRunAt ?? null,
       currency: input.currency.toUpperCase(),
+      invoicePrefix: prefix,
+      invoiceSequence: input.nextInvoiceSequence,
       taxRateBps: input.taxRateBps,
       discountRateBps: input.discountRateBps,
       notes: input.notes ?? null,
@@ -437,7 +429,7 @@ export async function listRecurringInvoiceSchedules(companyId: number) {
     .select({ schedule: recurringInvoiceSchedules, contact: contacts })
     .from(recurringInvoiceSchedules)
     .innerJoin(contacts, eq(contacts.id, recurringInvoiceSchedules.contactId))
-    .where(eq(recurringInvoiceSchedules.companyId, companyId))
+    .where(and(eq(recurringInvoiceSchedules.companyId, companyId), isNull(recurringInvoiceSchedules.archivedAt)))
     .orderBy(desc(recurringInvoiceSchedules.createdAt));
 }
 
@@ -447,7 +439,7 @@ export async function getRecurringInvoiceSchedule(companyId: number, scheduleId:
     .select({ schedule: recurringInvoiceSchedules, contact: contacts })
     .from(recurringInvoiceSchedules)
     .innerJoin(contacts, eq(contacts.id, recurringInvoiceSchedules.contactId))
-    .where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)))
+    .where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId), isNull(recurringInvoiceSchedules.archivedAt)))
     .limit(1);
   if (!result[0]) return null;
   const lineItems = await db.select().from(recurringInvoiceLineItems).where(eq(recurringInvoiceLineItems.scheduleId, scheduleId)).orderBy(asc(recurringInvoiceLineItems.position));
@@ -470,14 +462,75 @@ export async function getRecurringInvoiceScheduleByTaskUid(taskUid: string) {
 
 export async function setRecurringInvoiceScheduleActive(companyId: number, scheduleId: number, isActive: boolean, nextRunAt?: Date | null) {
   const db = await requireDb();
-  const result = await db.update(recurringInvoiceSchedules).set({ isActive, nextRunAt: nextRunAt ?? null }).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)));
+  const result = await db.update(recurringInvoiceSchedules).set({ isActive, nextRunAt: nextRunAt ?? null }).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId), isNull(recurringInvoiceSchedules.archivedAt)));
   if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Recurring schedule not found in this company");
   return getRecurringInvoiceSchedule(companyId, scheduleId);
 }
 
+/**
+ * Updates the next number for one recurring template. Once the template has
+ * issued a financial invoice, its prefix is immutable and its sequence cannot
+ * be moved backward, preventing duplicate HPP-style series numbers.
+ */
+export async function setRecurringInvoiceScheduleNumbering(companyId: number, scheduleId: number, input: { invoicePrefix: string; nextInvoiceSequence: number }) {
+  const db = await requireDb();
+  return db.transaction(async tx => {
+    const schedule = (await tx.select().from(recurringInvoiceSchedules).where(and(
+      eq(recurringInvoiceSchedules.id, scheduleId),
+      eq(recurringInvoiceSchedules.companyId, companyId),
+      isNull(recurringInvoiceSchedules.archivedAt),
+    )).limit(1))[0];
+    if (!schedule) throw new Error("Recurring schedule not found in this company");
+    const allocatedInvoice = (await tx.select({ id: invoices.id }).from(invoices).where(and(
+      eq(invoices.companyId, companyId),
+      eq(invoices.recurringScheduleId, scheduleId),
+      sql`${invoices.invoiceNumber} NOT LIKE 'DRAFT-%'`,
+    )).limit(1))[0];
+    const prefix = input.invoicePrefix.toUpperCase();
+    const otherSeries = await tx.select({ invoicePrefix: recurringInvoiceSchedules.invoicePrefix }).from(recurringInvoiceSchedules).where(and(
+      eq(recurringInvoiceSchedules.companyId, companyId),
+      ne(recurringInvoiceSchedules.id, scheduleId),
+    ));
+    if (hasRecurringSeriesPrefixConflict(otherSeries.map(series => series.invoicePrefix), prefix)) {
+      throw new Error("Another recurring schedule uses a prefix that could produce the same invoice number. Choose a distinct, non-overlapping series prefix.");
+    }
+    if (allocatedInvoice && prefix !== schedule.invoicePrefix) {
+      throw new Error("The recurring invoice prefix cannot change after this schedule has issued a financial invoice.");
+    }
+    if (allocatedInvoice && input.nextInvoiceSequence < schedule.invoiceSequence) {
+      throw new Error(`The next sequence cannot move backward from ${schedule.invoiceSequence} after this schedule has issued invoice numbers.`);
+    }
+    const candidateNumber = formatRecurringInvoiceNumber(prefix, input.nextInvoiceSequence);
+    const existingInvoiceNumber = (await tx.select({ id: invoices.id }).from(invoices).where(and(
+      eq(invoices.companyId, companyId),
+      eq(invoices.invoiceNumber, candidateNumber),
+    )).limit(1))[0];
+    if (existingInvoiceNumber) throw new Error(`Invoice number ${candidateNumber} already exists in this company. Choose the next unused number.`);
+    const updated = await tx.update(recurringInvoiceSchedules).set({ invoicePrefix: prefix, invoiceSequence: input.nextInvoiceSequence }).where(and(
+      eq(recurringInvoiceSchedules.id, scheduleId),
+      eq(recurringInvoiceSchedules.companyId, companyId),
+      eq(recurringInvoiceSchedules.invoiceSequence, schedule.invoiceSequence),
+      eq(recurringInvoiceSchedules.invoicePrefix, schedule.invoicePrefix),
+    ));
+    if (Number((updated as any)[0]?.affectedRows ?? 0) !== 1) {
+      throw new Error("The recurring invoice series changed concurrently. Refresh and try again.");
+    }
+    return {
+      schedule: (await tx.select().from(recurringInvoiceSchedules).where(eq(recurringInvoiceSchedules.id, scheduleId)).limit(1))[0],
+      previousPrefix: schedule.invoicePrefix,
+      previousNextSequence: schedule.invoiceSequence,
+      hasAllocatedInvoice: Boolean(allocatedInvoice),
+    };
+  });
+}
+
 export async function deleteRecurringInvoiceSchedule(companyId: number, scheduleId: number) {
   const db = await requireDb();
-  const result = await db.delete(recurringInvoiceSchedules).where(and(eq(recurringInvoiceSchedules.companyId, companyId), eq(recurringInvoiceSchedules.id, scheduleId)));
+  const result = await db.update(recurringInvoiceSchedules).set({ isActive: false, archivedAt: new Date(), nextRunAt: null }).where(and(
+    eq(recurringInvoiceSchedules.companyId, companyId),
+    eq(recurringInvoiceSchedules.id, scheduleId),
+    isNull(recurringInvoiceSchedules.archivedAt),
+  ));
   if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Recurring schedule not found in this company");
 }
 
@@ -591,9 +644,9 @@ export async function setInvoiceStatus(companyId: number, invoiceId: number, sta
 }
 
 /**
- * Reserve a tenant-local document number only at the first send attempt. The
- * conditional company counter update is retried under contention so parallel
- * sends cannot receive the same number. A reserved number is never reclaimed.
+ * Reserve a document number only at the first send attempt. Recurring
+ * templates increment their own invoice series; ordinary invoices retain the
+ * company counter. Conditional updates prevent parallel sends from colliding.
  */
 export async function allocateInvoiceNumberForSending(companyId: number, invoiceId: number) {
   const db = await requireDb();
@@ -603,12 +656,28 @@ export async function allocateInvoiceNumberForSending(companyId: number, invoice
       if (!invoice) throw new Error("Invoice not found");
       if (!isProvisionalInvoiceNumber(invoice.invoiceNumber)) return true;
       if (invoice.status !== "sending") throw new Error("Invoice must be claimed for sending before a number is allocated");
-      const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
-      if (!company) throw new Error("Company not found");
-      const nextSequence = company.invoiceSequence + 1;
-      const sequenceUpdate = await tx.update(companies).set({ invoiceSequence: nextSequence }).where(and(eq(companies.id, companyId), eq(companies.invoiceSequence, company.invoiceSequence)));
+      let invoiceNumber: string;
+      let sequenceUpdate: unknown;
+      if (invoice.recurringScheduleId) {
+        const schedule = (await tx.select().from(recurringInvoiceSchedules).where(and(
+          eq(recurringInvoiceSchedules.id, invoice.recurringScheduleId),
+          eq(recurringInvoiceSchedules.companyId, companyId),
+        )).limit(1))[0];
+        if (!schedule) throw new Error("Recurring invoice schedule not found");
+        invoiceNumber = formatRecurringInvoiceNumber(schedule.invoicePrefix, schedule.invoiceSequence);
+        sequenceUpdate = await tx.update(recurringInvoiceSchedules).set({ invoiceSequence: schedule.invoiceSequence + 1 }).where(and(
+          eq(recurringInvoiceSchedules.id, schedule.id),
+          eq(recurringInvoiceSchedules.companyId, companyId),
+          eq(recurringInvoiceSchedules.invoiceSequence, schedule.invoiceSequence),
+        ));
+      } else {
+        const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+        if (!company) throw new Error("Company not found");
+        const nextSequence = company.invoiceSequence + 1;
+        invoiceNumber = formatInvoiceNumber(company.invoicePrefix, invoice.issueDate, nextSequence);
+        sequenceUpdate = await tx.update(companies).set({ invoiceSequence: nextSequence }).where(and(eq(companies.id, companyId), eq(companies.invoiceSequence, company.invoiceSequence)));
+      }
       if (Number((sequenceUpdate as any)[0]?.affectedRows ?? 0) !== 1) return false;
-      const invoiceNumber = formatInvoiceNumber(company.invoicePrefix, invoice.issueDate, nextSequence);
       const invoiceUpdate = await tx.update(invoices).set({ invoiceNumber }).where(and(
         eq(invoices.id, invoiceId),
         eq(invoices.companyId, companyId),

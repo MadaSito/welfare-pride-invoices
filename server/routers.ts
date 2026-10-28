@@ -28,8 +28,8 @@ import {
   reconcileUncertainInvoiceDelivery,
   setRecurringInvoiceScheduleActive,
   saveEmailProviderConfig,
-  setCompanyInvoiceSequence,
   setCompanyLogoKey,
+  setRecurringInvoiceScheduleNumbering,
   setInvoiceStatus,
   updateContact,
   updateCompanyBranding,
@@ -74,6 +74,8 @@ const recurringInvoiceInput = z.object({
   companyId: z.number().int().positive(),
   name: z.string().trim().min(2).max(160),
   contactId: z.number().int().positive(),
+  invoicePrefix: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,24}$/, "Use 1–24 letters or numbers for the recurring invoice prefix.").refine(value => value !== "DRAFT", "DRAFT is reserved for provisional documents."),
+  nextInvoiceSequence: z.number().int().min(1).max(99_999_999),
   cadence: z.enum(["weekly", "monthly"]),
   dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
   dayOfMonth: z.number().int().min(1).max(28).optional().nullable(),
@@ -211,23 +213,6 @@ export const appRouter = router({
       await audit(ctx, { companyId, eventType: "company.branding.updated", resourceType: "company", resourceId: String(companyId), outcome: "success" });
       return company;
     }),
-    setInvoiceSequence: protectedProcedure.input(companyIdInput.extend({ nextSequence: z.number().int().min(1).max(99_999_999) })).mutation(async ({ ctx, input }) => {
-      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
-      try {
-        const result = await setCompanyInvoiceSequence(input.companyId, input.nextSequence);
-        await audit(ctx, {
-          companyId: input.companyId,
-          eventType: "company.invoice_sequence.migrated",
-          resourceType: "company",
-          resourceId: String(input.companyId),
-          outcome: "success",
-          metadata: { previousNextSequence: result.previousSequence, nextSequence: input.nextSequence, hasAllocatedInvoice: result.hasAllocatedInvoice },
-        });
-        return result.company;
-      } catch (error) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The invoice sequence could not be updated." });
-      }
-    }),
     uploadLogo: protectedProcedure.input(companyIdInput.extend({ base64: z.string().min(1).max(7_000_000), mimeType: z.enum(["image/png", "image/jpeg"]) })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
       const binary = Buffer.from(input.base64, "base64");
@@ -307,7 +292,7 @@ export const appRouter = router({
           heartbeatTaskUid: task.taskUid,
           nextRunAt: nextRunDate(task.nextExecutionAt),
         });
-        await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.created", resourceType: "recurring_invoice_schedule", resourceId: String(schedule?.schedule.id), outcome: "success", metadata: { cadence: input.cadence, autoSend: input.autoSend } });
+        await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.created", resourceType: "recurring_invoice_schedule", resourceId: String(schedule?.schedule.id), outcome: "success", metadata: { cadence: input.cadence, autoSend: input.autoSend, invoicePrefix: input.invoicePrefix, nextInvoiceSequence: input.nextInvoiceSequence } });
         return schedule;
       } catch (error) {
         try { await deleteHeartbeatJob(task.taskUid, ""); } catch { /* Orphan prevention is best effort; platform task has no business identifier in its payload. */ }
@@ -323,14 +308,35 @@ export const appRouter = router({
       await audit(ctx, { companyId: input.companyId, eventType: input.isActive ? "recurring_invoice.resumed" : "recurring_invoice.paused", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
       return updated;
     }),
+    setInvoiceSequence: protectedProcedure.input(companyIdInput.extend({
+      scheduleId: z.number().int().positive(),
+      invoicePrefix: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,24}$/, "Use 1–24 letters or numbers for the recurring invoice prefix.").refine(value => value !== "DRAFT", "DRAFT is reserved for provisional documents."),
+      nextInvoiceSequence: z.number().int().min(1).max(99_999_999),
+    })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const result = await setRecurringInvoiceScheduleNumbering(input.companyId, input.scheduleId, input);
+        await audit(ctx, {
+          companyId: input.companyId,
+          eventType: "recurring_invoice.series.migrated",
+          resourceType: "recurring_invoice_schedule",
+          resourceId: String(input.scheduleId),
+          outcome: "success",
+          metadata: { previousPrefix: result.previousPrefix, previousNextSequence: result.previousNextSequence, invoicePrefix: input.invoicePrefix, nextInvoiceSequence: input.nextInvoiceSequence, hasAllocatedInvoice: result.hasAllocatedInvoice },
+        });
+        return result.schedule;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The recurring invoice series could not be updated." });
+      }
+    }),
     delete: protectedProcedure.input(companyIdInput.extend({ scheduleId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "company_creator");
       const schedule = await getRecurringInvoiceSchedule(input.companyId, input.scheduleId);
       if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring schedule not found." });
-      await deleteHeartbeatJob(schedule.schedule.heartbeatTaskUid, "");
       await deleteRecurringInvoiceSchedule(input.companyId, input.scheduleId);
-      await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.deleted", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
-      return { deleted: true } as const;
+      try { await deleteHeartbeatJob(schedule.schedule.heartbeatTaskUid, ""); } catch { /* The archived schedule stays inactive even if remote cleanup is delayed. */ }
+      await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.archived", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
+      return { archived: true } as const;
     }),
   }),
 

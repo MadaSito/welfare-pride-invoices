@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { calculateInvoiceTotals, formatInvoiceNumber, isProvisionalInvoiceNumber, recurringOccurrenceKey } from "./db";
+import { calculateInvoiceTotals, formatInvoiceNumber, formatRecurringInvoiceNumber, hasRecurringSeriesPrefixConflict, isProvisionalInvoiceNumber, recurringOccurrenceKey } from "./db";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
 
 const originalKey = process.env.APP_CONFIG_ENCRYPTION_KEY;
@@ -22,6 +22,10 @@ describe("invoice totals", () => {
 describe("sent invoice numbering and recurrence keys", () => {
   it("formats a tenant-local sequential sent-document number and distinguishes provisional references", () => {
     expect(formatInvoiceNumber("WP", new Date("2026-10-28T09:00:00Z"), 1001)).toBe("WP-2026-1001");
+    expect(formatRecurringInvoiceNumber("HPP", 34)).toBe("HPP034");
+    expect(formatRecurringInvoiceNumber("HPP", 35)).toBe("HPP035");
+    expect(hasRecurringSeriesPrefixConflict(["HPP"], "HPP1")).toBe(true);
+    expect(hasRecurringSeriesPrefixConflict(["HPP"], "HPC")).toBe(false);
     expect(isProvisionalInvoiceNumber("DRAFT-ABCDEFGH12")).toBe(true);
     expect(isProvisionalInvoiceNumber("WP-2026-1001")).toBe(false);
   });

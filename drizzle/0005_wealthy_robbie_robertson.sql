@@ -1,0 +1,2 @@
+ALTER TABLE `recurring_invoice_schedules` ADD `invoicePrefix` varchar(24) DEFAULT 'REC' NOT NULL;--> statement-breakpoint
+ALTER TABLE `recurring_invoice_schedules` ADD `invoiceSequence` int DEFAULT 1 NOT NULL;
