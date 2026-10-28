@@ -108,12 +108,12 @@ export async function ensureDefaultTenantForUser(user: User) {
 
 export async function getCompaniesForUser(user: User) {
   const db = await requireDb();
-  if (user.role === "admin") return db.select().from(companies).orderBy(asc(companies.name));
+  if (user.role === "admin") return db.select().from(companies).where(isNull(companies.archivedAt)).orderBy(asc(companies.name));
   return db
     .select({ company: companies, memberRole: companyMembers.role })
     .from(companyMembers)
     .innerJoin(companies, eq(companies.id, companyMembers.companyId))
-    .where(eq(companyMembers.userId, user.id))
+    .where(and(eq(companyMembers.userId, user.id), isNull(companies.archivedAt)))
     .orderBy(asc(companies.name));
 }
 
@@ -122,15 +122,35 @@ export async function getCompanyById(companyId: number) {
   return (await db.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
 }
 
-export async function getCompanyAccess(user: User, companyId: number): Promise<CompanyMemberRole | null> {
-  if (user.role === "admin") return "platform_admin";
+export async function getCompanyAccess(user: User, companyId: number, includeArchived = false): Promise<CompanyMemberRole | null> {
   const db = await requireDb();
+  const visibility = includeArchived ? undefined : isNull(companies.archivedAt);
+  if (user.role === "admin") {
+    const company = await db.select({ id: companies.id }).from(companies).where(visibility ? and(eq(companies.id, companyId), visibility) : eq(companies.id, companyId)).limit(1);
+    return company[0] ? "platform_admin" : null;
+  }
   const member = await db
     .select({ role: companyMembers.role })
     .from(companyMembers)
-    .where(and(eq(companyMembers.companyId, companyId), eq(companyMembers.userId, user.id)))
+    .innerJoin(companies, eq(companies.id, companyMembers.companyId))
+    .where(visibility ? and(eq(companyMembers.companyId, companyId), eq(companyMembers.userId, user.id), visibility) : and(eq(companyMembers.companyId, companyId), eq(companyMembers.userId, user.id)))
     .limit(1);
   return member[0]?.role ?? null;
+}
+
+export async function listArchivedCompaniesForUser(user: User) {
+  const db = await requireDb();
+  if (user.role === "admin") return db.select().from(companies).where(sql`${companies.archivedAt} IS NOT NULL`).orderBy(desc(companies.archivedAt));
+  return db
+    .select({ company: companies, memberRole: companyMembers.role })
+    .from(companyMembers)
+    .innerJoin(companies, eq(companies.id, companyMembers.companyId))
+    .where(and(
+      eq(companyMembers.userId, user.id),
+      eq(companyMembers.role, "platform_admin"),
+      sql`${companies.archivedAt} IS NOT NULL`,
+    ))
+    .orderBy(desc(companies.archivedAt));
 }
 
 export async function hasCompanyAdministratorMembership(userId: number) {
@@ -188,6 +208,34 @@ export async function updateCompanyBranding(companyId: number, input: {
 export async function setCompanyLogoKey(companyId: number, logoKey: string) {
   const db = await requireDb();
   await db.update(companies).set({ logoKey }).where(eq(companies.id, companyId));
+  return getCompanyById(companyId);
+}
+
+export async function archiveCompany(companyId: number) {
+  const db = await requireDb();
+  return db.transaction(async tx => {
+    const now = new Date();
+    const result = await tx.update(companies).set({ archivedAt: now }).where(and(eq(companies.id, companyId), isNull(companies.archivedAt)));
+    if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Active company not found");
+    const sendingInvoice = (await tx.select({ id: invoices.id }).from(invoices).where(and(
+      eq(invoices.companyId, companyId),
+      eq(invoices.status, "sending"),
+    )).limit(1))[0];
+    if (sendingInvoice) throw new Error("This company has an invoice delivery in progress. Reconcile or complete it before archiving.");
+    const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+    const schedules = await tx.select({ taskUid: recurringInvoiceSchedules.heartbeatTaskUid }).from(recurringInvoiceSchedules).where(and(
+      eq(recurringInvoiceSchedules.companyId, companyId),
+      eq(recurringInvoiceSchedules.isActive, true),
+    ));
+    await tx.update(recurringInvoiceSchedules).set({ isActive: false, nextRunAt: null }).where(eq(recurringInvoiceSchedules.companyId, companyId));
+    return { company, taskUids: schedules.map(schedule => schedule.taskUid) };
+  });
+}
+
+export async function restoreCompany(companyId: number) {
+  const db = await requireDb();
+  const result = await db.update(companies).set({ archivedAt: null }).where(and(eq(companies.id, companyId), sql`${companies.archivedAt} IS NOT NULL`));
+  if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Archived company not found");
   return getCompanyById(companyId);
 }
 
@@ -265,14 +313,14 @@ export async function createInvoice(companyId: number, createdByUserId: number, 
   recurringOccurrenceKey?: string | null;
 }) {
   const db = await requireDb();
-  const company = await getCompanyById(companyId);
-  if (!company) throw new Error("Company not found");
-  const client = (await db.select().from(contacts).where(and(eq(contacts.id, input.contactId), eq(contacts.companyId, companyId))).limit(1))[0];
-  if (!client) throw new Error("Client does not belong to this company");
   const totals = calculateInvoiceTotals(input.lineItems, input.taxRateBps, input.discountRateBps);
   const initialStatus = input.initialStatus ?? "draft";
   let invoiceId = 0;
   await db.transaction(async tx => {
+    const activeCompany = await tx.update(companies).set({ updatedAt: new Date() }).where(and(eq(companies.id, companyId), isNull(companies.archivedAt)));
+    if (Number((activeCompany as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("This company is archived or no longer available for invoice creation.");
+    const client = (await tx.select().from(contacts).where(and(eq(contacts.id, input.contactId), eq(contacts.companyId, companyId))).limit(1))[0];
+    if (!client) throw new Error("Client does not belong to this company");
     const insert = await tx.insert(invoices).values({
       companyId,
       contactId: input.contactId,
@@ -335,6 +383,23 @@ export async function updateInvoiceDraft(companyId: number, invoiceId: number, i
     await tx.insert(invoiceLineItems).values(input.lineItems.map((item, index) => ({ ...item, invoiceId, position: index + 1 })));
   });
   return getInvoiceBundle(companyId, invoiceId);
+}
+
+/** Drafts have no financial number and may be permanently discarded before finalization. */
+export async function discardInvoiceDraft(companyId: number, invoiceId: number) {
+  const db = await requireDb();
+  await db.transaction(async tx => {
+    const activeCompany = await tx.update(companies).set({ updatedAt: new Date() }).where(and(eq(companies.id, companyId), isNull(companies.archivedAt)));
+    if (Number((activeCompany as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("This company is archived or no longer available for draft discard.");
+    const result = await tx.delete(invoices).where(and(
+      eq(invoices.id, invoiceId),
+      eq(invoices.companyId, companyId),
+      eq(invoices.status, "draft"),
+    ));
+    if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) {
+      throw new Error("Only an unfinalized draft invoice can be discarded.");
+    }
+  });
 }
 
 export async function listInvoices(companyId: number) {
@@ -633,13 +698,17 @@ export async function getInvoiceBundle(companyId: number, invoiceId: number) {
 export async function setInvoiceStatus(companyId: number, invoiceId: number, status: "finalized" | "sending" | "sent" | "paid" | "void", expectedCurrentStatus: InvoiceStatus) {
   const db = await requireDb();
   const now = new Date();
-  const result = await db.update(invoices).set({
-    status,
-    ...(status === "finalized" ? { finalizedAt: now } : {}),
-    ...(status === "sent" ? { sentAt: now } : {}),
-    ...(status === "paid" ? { paidAt: now } : {}),
-  }).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId), eq(invoices.status, expectedCurrentStatus)));
-  if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Invoice state changed before this action could be completed");
+  await db.transaction(async tx => {
+    const activeCompany = await tx.update(companies).set({ updatedAt: now }).where(and(eq(companies.id, companyId), isNull(companies.archivedAt)));
+    if (Number((activeCompany as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("This company is archived and invoice state cannot be changed.");
+    const result = await tx.update(invoices).set({
+      status,
+      ...(status === "finalized" ? { finalizedAt: now } : {}),
+      ...(status === "sent" ? { sentAt: now } : {}),
+      ...(status === "paid" ? { paidAt: now } : {}),
+    }).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId), eq(invoices.status, expectedCurrentStatus)));
+    if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Invoice state changed before this action could be completed");
+  });
   return getInvoiceBundle(companyId, invoiceId);
 }
 
@@ -652,6 +721,8 @@ export async function allocateInvoiceNumberForSending(companyId: number, invoice
   const db = await requireDb();
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const allocation = await db.transaction(async tx => {
+      const activeCompany = await tx.update(companies).set({ updatedAt: new Date() }).where(and(eq(companies.id, companyId), isNull(companies.archivedAt)));
+      if (Number((activeCompany as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("This company is archived and cannot allocate invoice numbers.");
       const invoice = (await tx.select().from(invoices).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId))).limit(1))[0];
       if (!invoice) throw new Error("Invoice not found");
       if (!isProvisionalInvoiceNumber(invoice.invoiceNumber)) return true;

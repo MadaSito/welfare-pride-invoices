@@ -48,6 +48,7 @@ export const companies = mysqlTable(
     defaultBcc: varchar("defaultBcc", { length: 320 }),
     invoicePrefix: varchar("invoicePrefix", { length: 24 }).default("WP").notNull(),
     invoiceSequence: int("invoiceSequence").default(1000).notNull(),
+    archivedAt: timestamp("archivedAt"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },

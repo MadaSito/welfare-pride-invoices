@@ -31,6 +31,7 @@ export async function deliverFinalizedInvoice(input: {
 }) {
   const initial = await getInvoiceBundle(input.companyId, input.invoiceId);
   if (!initial) throw new InvoiceDeliveryError("Invoice not found.");
+  if (initial.company.archivedAt) throw new InvoiceDeliveryError("This company is archived and its invoices cannot be delivered.");
   if (initial.invoice.status !== "finalized") {
     throw new InvoiceDeliveryError("Only finalized invoices can be sent. Drafts must be finalized first, and sent or paid invoices cannot be delivered again.");
   }

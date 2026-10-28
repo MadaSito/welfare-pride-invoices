@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   assignCompanyMembership,
+  archiveCompany,
   completeEmailLog,
   createAuditLog,
   createCompany,
@@ -13,6 +14,7 @@ import {
   createRecurringInvoiceSchedule,
   DEFAULT_WELFARE_LOGO_KEY,
   deleteRecurringInvoiceSchedule,
+  discardInvoiceDraft,
   ensureDefaultTenantForUser,
   getCompaniesForUser,
   getCompanyById,
@@ -21,11 +23,13 @@ import {
   getInvoiceBundle,
   getRecurringInvoiceSchedule,
   listCompanyMembers,
+  listArchivedCompaniesForUser,
   listContacts,
   listEmailLogs,
   listInvoices,
   listRecurringInvoiceSchedules,
   reconcileUncertainInvoiceDelivery,
+  restoreCompany,
   setRecurringInvoiceScheduleActive,
   saveEmailProviderConfig,
   setCompanyLogoKey,
@@ -34,6 +38,7 @@ import {
   updateContact,
   updateCompanyBranding,
   updateInvoiceDraft,
+  hasCompanyAdministratorMembership,
   type InvoiceLineInput,
 } from "./db";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -45,7 +50,7 @@ import { deliverFinalizedInvoice, InvoiceDeliveryError } from "./services/invoic
 import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
-import { requireCompanyProvisioner, requireCompanyRole } from "./security/access";
+import { requireCompanyArchiveAdministrator, requireCompanyProvisioner, requireCompanyRole } from "./security/access";
 
 const companyIdInput = z.object({ companyId: z.number().int().positive() });
 const color = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Use a six-digit hex color.");
@@ -183,7 +188,7 @@ export const appRouter = router({
       const companies = normalizedCompanies(await getCompaniesForUser(ctx.user));
       const activeCompany = companies[0] ?? null;
       const metrics = activeCompany ? await getDashboardMetrics(activeCompany.id) : null;
-      return { companies, activeCompany, metrics, isPlatformAdmin: ctx.user.role === "admin" || companies.some(company => company.memberRole === "platform_admin") };
+      return { companies, activeCompany, metrics, isPlatformAdmin: ctx.user.role === "admin" || await hasCompanyAdministratorMembership(ctx.user.id) };
     }),
   }),
 
@@ -194,6 +199,7 @@ export const appRouter = router({
       await audit(ctx, { companyId: company?.id, eventType: "company.created", resourceType: "company", resourceId: String(company?.id), outcome: "success" });
       return company;
     }),
+    listArchived: protectedProcedure.query(async ({ ctx }) => listArchivedCompaniesForUser(ctx.user)),
     get: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId);
       const company = await getCompanyById(input.companyId);
@@ -212,6 +218,27 @@ export const appRouter = router({
       const company = await updateCompanyBranding(companyId, update);
       await audit(ctx, { companyId, eventType: "company.branding.updated", resourceType: "company", resourceId: String(companyId), outcome: "success" });
       return company;
+    }),
+    archive: protectedProcedure.input(companyIdInput).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const archived = await archiveCompany(input.companyId);
+        await Promise.allSettled(archived.taskUids.map(taskUid => updateHeartbeatJob(taskUid, { enable: false }, "")));
+        await audit(ctx, { companyId: input.companyId, eventType: "company.archived", resourceType: "company", resourceId: String(input.companyId), outcome: "success", metadata: { disabledRecurringSchedules: archived.taskUids.length } });
+        return { archived: true } as const;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The company could not be archived." });
+      }
+    }),
+    restore: protectedProcedure.input(companyIdInput).mutation(async ({ ctx, input }) => {
+      await requireCompanyArchiveAdministrator(ctx.user, input.companyId);
+      try {
+        const company = await restoreCompany(input.companyId);
+        await audit(ctx, { companyId: input.companyId, eventType: "company.restored", resourceType: "company", resourceId: String(input.companyId), outcome: "success" });
+        return company;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The company could not be restored." });
+      }
     }),
     uploadLogo: protectedProcedure.input(companyIdInput.extend({ base64: z.string().min(1).max(7_000_000), mimeType: z.enum(["image/png", "image/jpeg"]) })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
@@ -365,6 +392,16 @@ export const appRouter = router({
       const invoice = await updateInvoiceDraft(companyId, invoiceId, draft as Omit<z.infer<typeof invoiceInput>, "companyId">);
       await audit(ctx, { companyId, eventType: "invoice.draft.updated", resourceType: "invoice", resourceId: String(invoiceId), outcome: "success" });
       return invoice;
+    }),
+    discardDraft: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      try {
+        await discardInvoiceDraft(input.companyId, input.invoiceId);
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.draft.discarded", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success" });
+        return { discarded: true } as const;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The draft invoice could not be discarded." });
+      }
     }),
     finalize: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "company_creator");

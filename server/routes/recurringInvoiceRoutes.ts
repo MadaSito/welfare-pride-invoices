@@ -70,6 +70,10 @@ export function registerRecurringInvoiceScheduledRoutes(app: Express) {
       scheduleId = schedule.id;
       companyId = schedule.companyId;
       createdByUserId = schedule.createdByUserId;
+      if (bundle.company.archivedAt) {
+        res.status(200).json({ accepted: true, skipped: "company_archived", correlationId: id });
+        return;
+      }
       if (!schedule.isActive) {
         res.status(200).json({ accepted: true, skipped: "schedule_paused", correlationId: id });
         return;

@@ -86,7 +86,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         <div className="sidebar-brand"><BrandMark inverse /><button className="mobile-close" onClick={() => setMenuOpen(false)} aria-label="Close navigation"><X size={20} /></button></div>
         <div className="company-switcher">
           <Building2 size={16} />
-          <select value={activeCompany?.id ?? ""} onChange={event => setActiveCompanyId(Number(event.target.value))} aria-label="Active company">
+          <select value={activeCompany?.id ?? ""} disabled={!companies.length} onChange={event => setActiveCompanyId(Number(event.target.value))} aria-label="Active company">
+            {!companies.length && <option value="">No active companies</option>}
             {companies.map(company => <option key={company.id} value={company.id}>{company.name}</option>)}
           </select>
           <ChevronDown size={15} />
@@ -111,7 +112,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <div><span className="topbar-context">{activeCompany ? activeCompany.name : "Welfare Pride Invoices"}</span><span className="topbar-status"><span /> Secure workspace</span></div>
           <div className="topbar-actions">
             <button className="icon-button" title="Notifications"><Bell size={18} /></button>
-            {allNavigation.some(item => item.href === "/invoices") && <Link href="/invoices/new" className="button button-primary topbar-new"><FilePlus2 size={17} />New invoice</Link>}
+            {activeCompany && allNavigation.some(item => item.href === "/invoices") && <Link href="/invoices/new" className="button button-primary topbar-new"><FilePlus2 size={17} />New invoice</Link>}
           </div>
         </header>
         <main className="content-shell">{children}</main>

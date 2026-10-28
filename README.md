@@ -12,6 +12,8 @@ A secure, multi-tenant branded invoicing workspace for Welfare Pride and affilia
 - Administrator-selected Microsoft Graph or SMTP delivery, AES-256-GCM encrypted provider payloads, test delivery, PDF attachments, and durable email logs.
 - Weekly/monthly tenant-scoped recurring invoice templates with pause/resume/remove controls, UTC execution, review-first default behavior, and administrator-enabled auto-send through the selected provider.
 - Service-owned, idempotent platform-scheduler execution with recoverable run leases plus atomic number allocation at first send; one-off invoices use the company `PREFIX-YEAR-NNNN` series, while each recurring schedule owns a protected series such as `HPP035`. Company administrators can migrate a recurring template’s prefix and next number from prior invoices, with no backward movement or prefix changes after that template issues a financial number. Archived schedules retain their protected series and invoice history; ambiguous series such as `HPP` and `HPP1` are rejected. Post-dispatch uncertainty is held for administrator reconciliation instead of being blindly resent.
+- Draft-only discard controls: creators can permanently discard an unfinalized draft before it becomes an accounting document; finalized or delivered invoices stay immutable.
+- Reversible company portal archival: company administrators can hide a tenant while preserving all records, credentials, audit history, and numbering; archived companies can be restored by a retained administrator, with recurring schedules safely paused.
 - Structured audit data, correlation identifiers, validated HMAC-SHA256 webhook receipts, replay window enforcement, and conservative API rate limiting.
 
 ## Local development

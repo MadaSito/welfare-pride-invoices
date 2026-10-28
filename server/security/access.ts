@@ -17,6 +17,15 @@ export async function requireCompanyRole(user: User | null, companyId: number, m
   return role;
 }
 
+export async function requireCompanyArchiveAdministrator(user: User | null, companyId: number) {
+  if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "Sign in is required." });
+  const role = await getCompanyAccess(user, companyId, true);
+  if (!role || ROLE_WEIGHT[role] < ROLE_WEIGHT.platform_admin) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Company administrator access is required to manage archived companies." });
+  }
+  return role;
+}
+
 export function requirePlatformAdmin(user: User | null) {
   if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "Sign in is required." });
   if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Platform administrator access is required." });

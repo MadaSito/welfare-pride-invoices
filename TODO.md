@@ -40,6 +40,11 @@
   - Let a company administrator securely set the invoice prefix and next number for each recurring schedule during migration from a prior system (for example, `HPP` and `35` after `HPP034`). Persist the series with that schedule, require bounded validated values, audit the change, reject overlapping rendered prefixes such as `HPP`/`HPP1`, and block moving the schedule backward or changing its prefix after it has issued a financial invoice.
   - Record schedule creation, updates, executions, invoice creation, delivery outcomes, and safe failures in the existing audit trail. Document deployment and publish prerequisites for the platform scheduler.
 
+- [x] **Safe draft discard and company portal archive**
+  - Let a company creator or administrator permanently discard only an unfinalized **draft** invoice through a confirmed, tenant-scoped server action. Delete its draft line items with it, record an audit event, and never permit this action for finalized, sending, sent, paid, void, or uncertain-delivery documents.
+  - Let a company administrator archive a company from the portal without deleting invoices, contacts, email logs, credentials, audit records, recurring-series reservations, or scheduler run history. Hide archived companies from all normal workspace/company selectors and block ordinary tenant access and scheduler invoice creation while archived. Archive must serialize against invoice creation/delivery claims and refuse while a delivery is in progress, preventing a post-archive provider dispatch.
+  - Provide an administrator-only archived-company list and restore action. Restoring must make the company available again without automatically reactivating recurring schedules; archive/restore actions must be audit logged and tenant-scoped.
+
 - [x] **Quality, delivery, and GitHub source transfer**
   - Maintain TypeScript diagnostics, run type checks/build/tests applicable to modified code, and fix actionable errors.
   - Confirm the application has `/manus-routes.json`, an unauthenticated `/api/health`, durable object storage usage for uploaded logos/generated PDFs, and a production-capable Docker configuration.
