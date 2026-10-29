@@ -78,6 +78,20 @@
       "when": 1793278919853,
       "tag": "0010_uneven_sebastian_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "5",
+      "when": 1793284212529,
+      "tag": "0011_orange_vulture",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "5",
+      "when": 1793284824471,
+      "tag": "0012_needy_iron_fist",
+      "breakpoints": true
     }
   ]
 }

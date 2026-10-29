@@ -1,51 +1,27 @@
-# Welfare Pride Invoices — Security Model
+# Welfare Pride Invoices — Standalone Security Model
 
-## Authorization and tenancy
+## Identity and sessions
 
-The app validates the real Manus OAuth session on every protected tRPC request and PDF download. A user’s platform role (`admin` or `user`) is separate from tenant membership. Company resources are scoped through `company_members` and an explicit role hierarchy:
+Authentication is application-owned. Local passwords use scrypt with a random salt. Browser sessions are random opaque values kept only as SHA-256 hashes in MySQL, are short-lived for incomplete sign-in stages, and are revocable through session versioning. An `HttpOnly`, `Secure` (production), `SameSite=Lax` session cookie is paired with a readable CSRF cookie and required `x-wp-csrf-token` header on authenticated tRPC mutations. No platform OAuth, platform JWT, bearer-token fallback, browser session-storage token, or public platform configuration remains.
 
-| Role | Allowed actions |
-| --- | --- |
-| `company_viewer` | View and download permitted company invoices only |
-| `company_creator` | Viewer actions plus create, edit draft, finalize, and send company invoices; manage company contacts |
-| `platform_admin` | Full company administration: branding, members, delivery configuration, email logs, and security controls |
-| Platform `admin` | Cross-tenant operating role; may provision companies and receives company-administrator access |
+The bootstrap `admin@welfarepride.local` account starts with a generated one-time password, forced password change, and forced TOTP enrollment. Administrator password resets repeat that sequence. Local MFA uses encrypted RFC 6238 TOTP seeds and hashed, one-time recovery codes. Resetting MFA or revoking sessions invalidates active sessions.
 
-Every contact, invoice, line item, provider configuration, email log, and storage upload is authorized on the server with the requested `companyId`; a client-provided identifier never by itself grants access.
+## Microsoft Entra ID
 
-## Credential protection
+Entra uses Authorization Code with PKCE, one-time hashed state, nonce validation, a fixed HTTPS callback, discovery/JWKS signature validation, and exact tenant, issuer, and audience checks. Users must be provisioned by a platform administrator before Entra sign-in; a token email never grants access. First sign-in links a stable tenant/object ID, and later mismatch fails closed. The customer Entra tenant remains authoritative for Entra MFA policy.
 
-Graph and SMTP credentials are entered in the administrator screen but are encrypted before database persistence with AES-256-GCM. The server loads the encryption material only from `APP_CONFIG_ENCRYPTION_KEY`. Saved providers expose only safe metadata such as selected provider and display name. Client secrets, SMTP passwords, HMAC keys, storage credentials, and database credentials are never added to the browser bundle, user-visible API output, or audit metadata.
+## User lifecycle and tenancy
 
-## Request and document safeguards
+Global platform administrators may create local or Entra accounts, disable/enable accounts, create one-time local passwords, reset MFA/recovery data, revoke sessions, and manage company memberships. Every privileged action has an immutable audit record. Company roles remain server-enforced for every company, contact, invoice, schedule, branding, provider configuration, email log, and asset request. Global administration and company membership are deliberately separate.
 
-The server disables the `X-Powered-By` header, uses a request correlation identifier, adds `nosniff`, strict referrer, and permissions headers, and rate-limits `/api/*` requests in-process. It deliberately does not set `X-Frame-Options` or restrictive `frame-ancestors`, because authenticated Preview runs inside a cross-site HTTPS frame. Sessions preserve `SameSite=None; Secure` and HttpOnly behavior required for Preview compatibility.
+## Financial, mail, and tenant safeguards
 
-Logo uploads accept PNG/JPEG only, inspect the binary signature and dimensions, limit size to 5 MB, generate a tenant-prefixed object key server-side, and store ownership via the company record. PDF rendering uses a bounded `fit` box and locally hosted Roboto files, so logo aspect ratios are preserved and untrusted image URLs are not fetched from the browser.
+Server-side Zod validation recomputes invoice totals and protects lifecycle transitions. Review-first recurring documents enter `awaiting_approval`; only a tenant creator/admin can approve before finalization or delivery. Draft-only discard, protected sequence allocation, separate one-off/recurring series, durable outbox uncertainty, Graph/SMTP encryption, HMAC webhook verification, PDF `private, no-store`, tenant archive barriers, and immutable audit safeguards remain active.
 
-Invoice values are accepted as minor currency units on the server after strict Zod validation. Subtotal, discount, taxable base, tax, and total are recomputed server-side; status changes block editing after finalization. PDF downloads use an authenticated route and `Cache-Control: private, no-store`. A creator/admin may permanently discard only a tenant-scoped invoice still in `draft`; it has no financial number, its line items are removed with it, and the event is audited. A review-first recurring run creates `awaiting_approval`; only a tenant-scoped creator/admin approval may transition that generated document to `finalized` and make it eligible for delivery. Finalized, sending, sent, paid, void, and uncertain-delivery documents cannot be discarded. Draft, approval-queued, and finalized-review invoices use a provisional reference. The first actual send claims the document and atomically assigns its financial number: ordinary invoices use the company `PREFIX-YEAR-NNNN` counter, while recurring invoices use their schedule’s independently guarded prefix/sequence, such as `HPP035`. Concurrent sends cannot receive the same number. A number is not reclaimed after a failed or uncertain delivery, preventing accidental reuse.
+## S3 storage and Hostinger cron
 
-## Webhook verification
+Company logos use S3-compatible storage configured only through server environment values. Private storage uses short-lived signed redirects. Hostinger cron must send both `RECURRING_SCHEDULER_SECRET` and the schedule key to the internal recurring endpoint. The server ignores request-body identifiers, verifies archived/paused state, and retains the durable run lease and occurrence ledger, so retries cannot create duplicate invoices. Rotate scheduler and encryption secrets under an approved operating procedure.
 
-`POST /api/webhooks/delivery` requires the raw request bytes and headers:
+## Operational baseline
 
-- `x-wp-timestamp`: Unix seconds or milliseconds.
-- `x-wp-signature`: `sha256=<hex hmac>` computed over `<timestamp>.<raw body>`.
-
-The endpoint rejects unknown/malformed signatures using a timing-safe comparison, rejects timestamps outside a five-minute replay window, emits a correlation ID, and records accepted/rejected receipt data without persisting the raw payload. Protect `WEBHOOK_SIGNING_SECRET` through the same protected-secret flow used for runtime configuration.
-
-## Auditing and operational boundaries
-
-Security-sensitive actions including invoice creation/finalization/sending, logo upload, role assignment, branding changes, and delivery configuration/test attempts produce structured audit records with an actor, resource type, tenant, outcome, and correlation ID. Invoice delivery creates a durable outbox log before provider dispatch. Known pre-dispatch failures are `failed`; a timeout, crash, or error after dispatch starts is `uncertain`, keeps the invoice in `sending`, and is never automatically resent. A company administrator must reconcile the provider outcome in Email logs by marking it delivered or explicitly enabling a later manual retry.
-
-Recurring-series migration is a company-administrator-only authenticated mutation on the individual schedule. It accepts a validated alphanumeric prefix and bounded positive next number, updates the schedule with a conditional transactional write, captures the prior and requested values in the audit log, and prevents moving backward or changing the prefix after that template has allocated a financial invoice number. Prefixes that could render ambiguously (for example, `HPP` and `HPP1`) are rejected within a company, and the reserved provisional prefix `DRAFT` is rejected for both recurring and company one-off series. The requested next rendered number is checked against the company invoice history. It changes only the next recurring invoice to be issued and never rewrites historical invoice records. A separate administrator-only company one-off counter sets the actual next `PREFIX-YEAR-NNNN` number; it is transactionally converted to the stored counter and cannot move backward after a local one-off invoice has received a financial number. The company-counter update and generated-recurring approval each persist their audit record in the same transaction as the financial state change; an audit-write failure rolls the change back.
-
-## Recurring invoice scheduler
-
-Recurring schedule creation, pause/resume, and archival require tenant creator access; automatic delivery additionally requires a tenant administrator and an active encrypted provider configuration. The server creates, updates, and deletes each platform scheduler task through a shared service identity, while retaining the initiating user only in the audit data. Archival disables the task and hides the schedule from normal operations while retaining its series reservation, invoices, and run ledger. This lets any subsequently authorized tenant operator manage the schedule without breaking historical numbering. `POST /api/scheduled/recurring-invoices` accepts only a verified platform scheduler identity, derives the schedule solely from that task UID, and does not trust callback-body company, invoice, or recipient values.
-
-Companies are archived rather than deleted. Company archive requires an active company-administrator membership, locks and marks the tenant before schedule deactivation, and refuses while any invoice delivery is actively `sending`; invoice creation, discard, status changes, and number allocation each reassert an active company inside their own transaction. This prevents a successful archive from racing a later provider dispatch. Archival hides the tenant from normal workspace discovery, blocks routine tenant authorization and invoice delivery, deactivates recurring schedules, and retains invoices, contacts, email logs, provider configuration, audit records, and schedule history. Archived-company listing and restore are limited to administrators who retain a membership for that tenant; restoring does not reactivate recurring schedules automatically. Archive and restore actions are audit logged.
-
-Every UTC daily, weekly, monthly, semiannual, or yearly occurrence has a unique run ledger row, a five-minute recoverable lease, and a durable invoice link recorded before delivery. Semiannual schedules are anchored to an explicit January–June month and day, while yearly schedules are anchored to an explicit month and day; server validation, cron generation, next-run calculation, and occurrence keys use the same saved anchors. The persisted scheduler-selected `nextRunAt`, not delayed callback arrival time, anchors the occurrence key and issue date. Retries reuse that row and existing invoice record instead of creating another document. Scheduled invoice creation obtains an active, unarchived schedule fence inside the same transaction, so a completed pause/archive cannot race a new recurring document. An in-progress or uncertain provider attempt is never duplicated. Schedule execution, created/finalized invoices, auto-send success, safe failures, and reconciliations are retained in the company audit trail.
-
-The included in-process rate limiter is a conservative baseline. For production multi-instance traffic, use Cloudflare WAF/rate limiting and a shared store such as Redis for gateway limits, CIDR controls, webhook queues, and dynamic blocklists. Configure Entra ID/Google/SAML/TOTP only after their provider metadata, policies, and organization-required enrollment controls are available; they are not represented as falsely active in this baseline.
+The application disables `X-Powered-By`, sends security headers and correlation IDs, and rate-limits API traffic in-process. Use Hostinger/Cloudflare HTTPS, WAF and distributed rate limiting for multi-instance production workloads. Never expose database, S3, Graph, SMTP, Entra, scheduler, encryption, or webhook secrets in source, browser variables, logs, or Git history.

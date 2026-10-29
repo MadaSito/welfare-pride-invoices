@@ -5,7 +5,7 @@ import { getCompanyAccess, getInvoiceBundle, createAuditLog, recordWebhookEvent 
 import { invoicePdfFilename, renderInvoicePdf } from "../services/pdf";
 import { verifyWebhookSignature } from "../security/hmac";
 import { requestIpHash } from "../security/requestSecurity";
-import { sdk } from "../_core/sdk";
+import { authenticateRequest } from "../auth/service";
 
 function correlationId(res: Response) {
   return typeof res.locals.correlationId === "string" ? res.locals.correlationId : crypto.randomUUID();
@@ -20,10 +20,9 @@ export function registerInvoiceHttpRoutes(app: Express) {
       return;
     }
     try {
-      let user;
-      try {
-        user = await sdk.authenticateRequest(req);
-      } catch {
+      const session = await authenticateRequest(req);
+      const user = session?.stage === "full" ? session.user : null;
+      if (!user) {
         res.status(401).json({ error: "Authentication is required to download this invoice.", correlationId: correlationId(res) });
         return;
       }

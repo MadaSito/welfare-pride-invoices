@@ -23,7 +23,7 @@ export function requestSecurity(req: Request, res: Response, next: NextFunction)
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   // HTTPS sources and cross-site frame ancestry preserve managed Preview while object/base/form sources stay constrained.
   res.setHeader("Content-Security-Policy", "default-src 'self' https: data: blob:; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' https: data: blob:; font-src 'self' data:; connect-src 'self' https: wss: ws:; frame-ancestors https:");
-  // Do not set X-Frame-Options: Manus Preview is embedded cross-site.
+  // Set headers for the standalone Hostinger application.
   next();
 }
 

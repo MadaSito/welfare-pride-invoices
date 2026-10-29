@@ -1,68 +1,68 @@
-# Welfare Pride Invoices — Deployment Guide
+# Welfare Pride Invoices — Standalone Hostinger Deployment
 
-## Runtime model
+## Runtime
 
-Welfare Pride Invoices is a Node 22 application that serves the React workspace and Express/tRPC API from the same process. It requires a MySQL-compatible database, durable object storage for company logos, and a protected runtime-secret store. The application listens on `PORT` (default `3000`) and exposes the unauthenticated health response at `GET /api/health`.
+This is a standalone Node 22 Express/tRPC and React application. It has no platform OAuth, platform JWT, platform object-storage proxy, or platform scheduler dependency. Hostinger must provide a MySQL-compatible `DATABASE_URL`, an S3-compatible object store, HTTPS, and a Node process that receives `PORT`. The health check is `GET /api/health`.
 
-The supplied `Dockerfile` installs the pinned `pnpm@10.18.0` toolchain, builds the browser and server output, and starts `node dist/index.js`. Build-time environments must not contain production secrets; the database connection and protected values are only required at runtime.
-
-## Required protected runtime values
-
-| Name | Purpose | When needed |
-| --- | --- | --- |
-| `DATABASE_URL` | MySQL-compatible application connection | Always; supplied by managed database in this project |
-| `MANUS_JWT_SECRET` and OAuth values | Validated Manus OAuth session handling | Supplied by the platform |
-| `MANUS_API_URL`, `MANUS_API_KEY` | Durable company-logo storage signing | Supplied by the platform |
-| `APP_CONFIG_ENCRYPTION_KEY` | 32-byte base64 or hexadecimal AES-256-GCM key that encrypts saved Graph/SMTP payloads | Before an administrator saves delivery credentials |
-| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 secret for `/api/webhooks/delivery` | Before accepting signed webhooks |
-
-Generate a deployment-specific encryption key securely, for example with `openssl rand -base64 32`, then store it only through the protected-secret input flow. Do not put either application secret in source files, browser variables, screenshots, Git history, or a client-accessible configuration endpoint.
-
-## Microsoft Graph delivery setup
-
-1. Create or select a Microsoft Entra application in the tenant that owns the sending mailbox.
-2. Grant Microsoft Graph **application** permission `Mail.Send` and complete administrator consent. Restrict the application to approved mailboxes through Exchange application access policy where organizational policy requires it.
-3. Create a client secret and capture the tenant ID, client ID, sender mailbox, and configured display name.
-4. In **Email delivery**, choose **Microsoft Graph API**, enter the details, and save. The server AES-encrypts the saved payload.
-5. Send a test email to an administrator-controlled mailbox and inspect **Email logs**. Microsoft 365 mailbox settings remain authoritative for the final visible From display name.
-
-## SMTP delivery setup
-
-Use the administrator-provided SMTP host, port, transport-security mode, username, password, From mailbox, and display name. Save it from **Email delivery**, then send a test to an administrator-controlled mailbox. The application never sends a saved password back to the browser.
-
-## Cloudflare / edge configuration
-
-Run the app behind HTTPS and keep the Cloudflare proxy/WAF in front of the origin. Enable managed WAF rules, bot protection appropriate to the organization, rate limiting for `/api/*`, and explicit administrative CIDR allow/block policies at the edge. Do not cache authenticated pages, APIs, PDF responses, or webhook endpoints. The application trusts one reverse proxy hop and adds correlation IDs plus a conservative in-process rate limit; high-volume production deployments should enforce distributed rate limiting and dynamic CIDR controls at Cloudflare/Redis rather than relying on process memory.
-
-## Hostinger Node.js / Passenger deployment
-
-In Hostinger's Node.js app controls, select Node 22, use the repository root as the application root, install dependencies with `pnpm install --frozen-lockfile`, build with `pnpm build`, and start with `node dist/index.js`. Configure the required protected runtime values in Hostinger's environment configuration rather than an uploaded `.env` file. Point the domain/proxy to the Node app, set `NODE_ENV=production`, and make sure the configured application port is passed through as `PORT`.
-
-For a Passenger-style setup, the production startup target is the built server entry point, `dist/index.js`; do not use the Vite development server. Verify `GET /api/health` only after the process is bound and behind the intended HTTPS proxy.
-
-## Docker / VPS deployment
-
-A representative production invocation is:
+Install and start:
 
 ```bash
-docker build -t welfare-pride-invoices .
-docker run --rm -p 3000:3000 \
-  -e DATABASE_URL='…' \
-  -e APP_CONFIG_ENCRYPTION_KEY='…' \
-  -e WEBHOOK_SIGNING_SECRET='…' \
-  welfare-pride-invoices
+corepack enable
+pnpm install --frozen-lockfile
+pnpm db:migrate
+pnpm bootstrap:admin   # run once; capture output in a password manager
+pnpm build
+NODE_ENV=production node dist/index.js
 ```
 
-Terminate TLS at Cloudflare or a hardened reverse proxy, never expose the raw Node listener directly to the public internet, and route `/api/health` only for trusted infrastructure health checks where possible.
+Run `pnpm bootstrap:admin` before retiring the legacy login. It creates `admin@welfarepride.local` only when absent, prints a strong one-time password once, requires a password change, and then requires TOTP MFA enrollment.
 
-## Go-live verification
+## Required environment variables
 
-Confirm that the health endpoint answers, a user can complete real OAuth login, the first administrator can see the default Welfare Pride company, an authorized logo can be uploaded, a PDF downloads, the selected provider test appears in Email logs, and a rejected webhook receives no processing acknowledgement. Ensure test clients and test invoices are removed or clearly marked before production use.
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | MySQL-compatible connection string |
+| `APP_CONFIG_ENCRYPTION_KEY` | 32-byte base64/hex AES-256-GCM key for Graph/SMTP settings and TOTP seeds |
+| `WEBHOOK_SIGNING_SECRET` | HMAC secret for `/api/webhooks/delivery` |
+| `APP_ORIGIN` | Exact public HTTPS origin, e.g. `https://invoices.example.org` |
+| `RECURRING_SCHEDULER_SECRET` | High-entropy secret accepted only by the recurring cron endpoint |
+| `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET` | S3-compatible logo storage location |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | S3 storage credentials |
+| `S3_PUBLIC_BASE_URL` | Optional public logo base URL; omit to use a short-lived signed redirect |
+
+Keep values in Hostinger environment configuration, not source, `.env` uploads, screenshots, or browser-visible variables. Set `FORCE_SECURE_COOKIES=true` if Hostinger does not set `NODE_ENV=production` itself.
+
+## Microsoft Entra ID
+
+Entra sign-in is optional. To enable it, create a confidential web application and add exactly this redirect URI:
+
+```text
+https://your-domain.example/api/auth/entra/callback
+```
+
+Set `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, and `ENTRA_CLIENT_SECRET`. The app uses Authorization Code with PKCE, validates state, nonce, issuer, tenant, audience, and JWKS signatures. A platform administrator must first provision an Entra user by email in **Security & access**; a valid Entra token alone never creates a company role or invoice access.
+
+## Local authentication and MFA
+
+Local accounts use an application-owned opaque session cookie, CSRF header/cookie verification, scrypt password hashes, TOTP MFA, and hashed one-time recovery codes. Every temporary or administrator-reset local password forces a change at next sign-in, then forces authenticator enrollment before a full session is issued. Entra users follow the tenant’s Entra MFA policy.
+
+## S3-compatible company logos
+
+Create a private bucket/prefix for this application. The server validates image bytes before upload, stores non-guessable tenant-prefixed keys, and serves a short-lived signed redirect unless `S3_PUBLIC_BASE_URL` is deliberately configured. Do not reuse the old platform storage endpoint.
 
 ## Recurring invoices
 
-Recurring schedules are application-owned platform Heartbeat jobs. They run only against a **published** version that contains `POST /api/scheduled/recurring-invoices`; a local preview or an un-published Git push cannot execute a live schedule. Create schedules from **Recurring invoices** after deployment, choose a daily, weekly, monthly, every-six-months, or yearly UTC run time, and either leave the default review-first mode or enable auto-send only after a protected Graph/SMTP provider is active. Review-first runs appear in the recurring workspace’s approval queue and must be approved by a creator/admin before they become finalized and can be manually sent. Six-month schedules require a January–June anchor month and a day; yearly schedules require a month and day.
+Hostinger cron invokes the protected endpoint for each active schedule:
 
-The scheduler is created and managed through the application’s shared platform service identity, so any appropriately authorized company operator can pause, resume, or archive a schedule regardless of who created it. Archival stops future runs while retaining its invoice-series reservation, run ledger, and historical invoice links. It authenticates callbacks with a platform-issued signed ticket; the handler resolves the schedule from that ticket’s task UID and ignores request-body identifiers. Each schedule occurrence is stored in an idempotency ledger with a recoverable lease and a durable invoice link, so retries or a process interruption cannot create a duplicate invoice.
+```bash
+curl --fail --silent --show-error -X POST \
+  -H "x-wp-scheduler-secret: $RECURRING_SCHEDULER_SECRET" \
+  -H "x-wp-schedule-key: SCHEDULE_KEY" \
+  https://your-domain.example/api/internal/cron/recurring-invoices
+```
 
-Invoice drafts and finalized review documents use provisional references. One-off invoices allocate a company-scoped `PREFIX-YEAR-NNNN` number atomically on their first send attempt. Every recurring schedule owns its own series and can be migrated from prior documents—for example, set prefix `HPP` and next number `35` after `HPP033` and `HPP034`, producing `HPP035`. Overlapping prefixes such as `HPP` and `HPP1` are rejected because they could render the same number. Known pre-dispatch failures may be safely retried; any failure after provider dispatch begins is marked **uncertain**, stays out of automatic resend, and requires a company administrator to reconcile it in **Email logs** after checking the provider. A number is never reused.
+Schedule it frequently enough for the configured UTC cadence (for example, every five minutes). The persistent schedule key is generated when a recurring template is created and must be treated as operational configuration, not a browser credential. The handler still resolves all business data server-side, checks company/schedule active state, uses its durable occurrence ledger and leases, and never trusts request body invoice identifiers. Review-first invoices enter **awaiting approval**; automatic delivery requires an active Graph/SMTP configuration.
+
+## Mail, TLS, and production checks
+
+Configure Graph or SMTP within **Email delivery** after deployment. Continue to restrict Graph `Mail.Send` and mailbox scope according to Microsoft 365 policy. Terminate TLS at Hostinger or a hardened reverse proxy; set `APP_ORIGIN` to the exact HTTPS origin; do not cache authenticated pages, PDFs, APIs, or webhooks. Verify health, bootstrap login, forced password change, MFA enrollment, a second local user, an Entra provisioned user, tenant role assignment, logo upload, PDF download, mail test, protected scheduler rejection without its secret, and webhook HMAC rejection before go-live.

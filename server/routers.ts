@@ -1,4 +1,3 @@
-import { COOKIE_NAME } from "@shared/const";
 import { TRPCError } from "@trpc/server";
 import crypto from "node:crypto";
 import { z } from "zod";
@@ -43,16 +42,15 @@ import {
   hasCompanyAdministratorMembership,
   type InvoiceLineInput,
 } from "./db";
-import { getSessionCookieOptions } from "./_core/cookies";
-import { createHeartbeatJob, deleteHeartbeatJob, updateHeartbeatJob } from "./_core/heartbeat";
-import { systemRouter } from "./_core/systemRouter";
-import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { testProviderConnection, type ProviderConfig } from "./services/mailer";
 import { deliverFinalizedInvoice, InvoiceDeliveryError } from "./services/invoiceDelivery";
 import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
 import { requireCompanyArchiveAdministrator, requireCompanyProvisioner, requireCompanyRole } from "./security/access";
+import { createManagedUser, listManagedUsers, logout as logoutStandalone, resetManagedMfa, resetManagedPassword, revokeManagedSessions, setManagedUserStatus } from "./auth/service";
+import { createLocalSchedule, removeLocalSchedule, updateLocalSchedule } from "./scheduler/local";
 
 const companyIdInput = z.object({ companyId: z.number().int().positive() });
 const color = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Use a six-digit hex color.");
@@ -201,13 +199,23 @@ function nextRunDate(value?: string | null) {
 }
 
 export const appRouter = router({
-  system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
-    logout: publicProcedure.mutation(({ ctx }) => {
-      ctx.res.clearCookie(COOKIE_NAME, { ...getSessionCookieOptions(ctx.req), maxAge: -1 });
+    logout: publicProcedure.mutation(async ({ ctx }) => {
+      await logoutStandalone(ctx.req, ctx.res);
       return { success: true } as const;
     }),
+  }),
+
+  users: router({
+    list: adminProcedure.query(() => listManagedUsers()),
+    create: adminProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email(), provider: z.enum(["local", "entra"]), globalAdmin: z.boolean().default(false) })).mutation(async ({ ctx, input }) => {
+      const result = await createManagedUser(input); await audit(ctx, { eventType: "user.created", resourceType: "user", resourceId: String(result.userId), outcome: "success", metadata: { provider: input.provider, email: input.email, globalAdmin: input.globalAdmin } }); return result;
+    }),
+    setStatus: adminProcedure.input(z.object({ userId: z.number().int().positive(), enabled: z.boolean() })).mutation(async ({ ctx, input }) => { await setManagedUserStatus(input.userId, input.enabled); await audit(ctx, { eventType: input.enabled ? "user.enabled" : "user.disabled", resourceType: "user", resourceId: String(input.userId), outcome: "success" }); return { success: true }; }),
+    resetPassword: adminProcedure.input(z.object({ userId: z.number().int().positive() })).mutation(async ({ ctx, input }) => { const temporaryPassword = await resetManagedPassword(input.userId); await audit(ctx, { eventType: "user.password.reset", resourceType: "user", resourceId: String(input.userId), outcome: "success" }); return { temporaryPassword }; }),
+    resetMfa: adminProcedure.input(z.object({ userId: z.number().int().positive() })).mutation(async ({ ctx, input }) => { await resetManagedMfa(input.userId); await audit(ctx, { eventType: "user.mfa.reset", resourceType: "user", resourceId: String(input.userId), outcome: "success" }); return { success: true }; }),
+    revokeSessions: adminProcedure.input(z.object({ userId: z.number().int().positive() })).mutation(async ({ ctx, input }) => { await revokeManagedSessions(input.userId); await audit(ctx, { eventType: "user.sessions.revoked", resourceType: "user", resourceId: String(input.userId), outcome: "success" }); return { success: true }; }),
   }),
 
   workspace: router({
@@ -260,7 +268,7 @@ export const appRouter = router({
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
       try {
         const archived = await archiveCompany(input.companyId);
-        await Promise.allSettled(archived.taskUids.map(taskUid => updateHeartbeatJob(taskUid, { enable: false }, "")));
+        await Promise.allSettled(archived.taskUids.map(taskUid => updateLocalSchedule(taskUid, { enable: false })));
         await audit(ctx, { companyId: input.companyId, eventType: "company.archived", resourceType: "company", resourceId: String(input.companyId), outcome: "success", metadata: { disabledRecurringSchedules: archived.taskUids.length } });
         return { archived: true } as const;
       } catch (error) {
@@ -340,26 +348,19 @@ export const appRouter = router({
         const config = await getEmailProviderConfig(input.companyId);
         if (!config?.isActive) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Configure an active email provider before enabling automatic recurring delivery." });
       }
-      const task = await createHeartbeatJob({
-        name: `recurring-invoice-${input.companyId}-${crypto.randomUUID()}`,
-        cron: recurrenceCron(input),
-        path: "/api/scheduled/recurring-invoices",
-        method: "POST",
-        payload: {},
-        description: `Recurring invoice schedule for company ${input.companyId}.`,
-      }, "");
+      const task = await createLocalSchedule();
       try {
         const schedule = await createRecurringInvoiceSchedule({
           ...input,
           companyId: input.companyId,
           createdByUserId: ctx.user.id,
-          heartbeatTaskUid: task.taskUid,
+          schedulerKey: task.taskUid,
           nextRunAt: nextRunDate(task.nextExecutionAt),
         });
         await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.created", resourceType: "recurring_invoice_schedule", resourceId: String(schedule?.schedule.id), outcome: "success", metadata: { cadence: input.cadence, autoSend: input.autoSend, invoicePrefix: input.invoicePrefix, nextInvoiceSequence: input.nextInvoiceSequence } });
         return schedule;
       } catch (error) {
-        try { await deleteHeartbeatJob(task.taskUid, ""); } catch { /* Orphan prevention is best effort; platform task has no business identifier in its payload. */ }
+        await removeLocalSchedule(task.taskUid);
         throw error;
       }
     }),
@@ -401,7 +402,7 @@ export const appRouter = router({
       await requireCompanyRole(ctx.user, input.companyId, "company_creator");
       const schedule = await getRecurringInvoiceSchedule(input.companyId, input.scheduleId);
       if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring schedule not found." });
-      const task = await updateHeartbeatJob(schedule.schedule.heartbeatTaskUid, { enable: input.isActive }, "");
+      const task = await updateLocalSchedule(schedule.schedule.schedulerKey, { enable: input.isActive });
       const updated = await setRecurringInvoiceScheduleActive(input.companyId, input.scheduleId, input.isActive, input.isActive ? nextRunDate(task.nextExecutionAt) : null);
       await audit(ctx, { companyId: input.companyId, eventType: input.isActive ? "recurring_invoice.resumed" : "recurring_invoice.paused", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
       return updated;
@@ -432,7 +433,7 @@ export const appRouter = router({
       const schedule = await getRecurringInvoiceSchedule(input.companyId, input.scheduleId);
       if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring schedule not found." });
       await deleteRecurringInvoiceSchedule(input.companyId, input.scheduleId);
-      try { await deleteHeartbeatJob(schedule.schedule.heartbeatTaskUid, ""); } catch { /* The archived schedule stays inactive even if remote cleanup is delayed. */ }
+      await removeLocalSchedule(schedule.schedule.schedulerKey);
       await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.archived", resourceType: "recurring_invoice_schedule", resourceId: String(input.scheduleId), outcome: "success" });
       return { archived: true } as const;
     }),

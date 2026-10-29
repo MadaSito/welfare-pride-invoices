@@ -10,18 +10,67 @@ import {
   varchar,
 } from "drizzle-orm/mysql-core";
 
-/** Authenticated Manus identities. The platform admin role is intentionally separate from tenant roles. */
+/** Application-owned identities. The platform admin role is intentionally separate from tenant roles. */
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
+  // Retained during migration for historical foreign-key continuity; new local and
+  // Entra accounts use stable application/provider identifiers here.
   openId: varchar("openId", { length: 64 }).notNull().unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
+  normalizedEmail: varchar("normalizedEmail", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
+  authProvider: mysqlEnum("authProvider", ["local", "entra", "hybrid"]).default("local").notNull(),
+  accountStatus: mysqlEnum("accountStatus", ["active", "disabled", "invited"]).default("active").notNull(),
+  passwordHash: varchar("passwordHash", { length: 255 }),
+  mustChangePassword: boolean("mustChangePassword").default(false).notNull(),
+  mfaRequired: boolean("mfaRequired").default(true).notNull(),
+  mfaEnabled: boolean("mfaEnabled").default(false).notNull(),
+  mfaSecretEncrypted: text("mfaSecretEncrypted"),
+  mfaEnrolledAt: timestamp("mfaEnrolledAt"),
+  entraTenantId: varchar("entraTenantId", { length: 96 }),
+  entraObjectId: varchar("entraObjectId", { length: 96 }),
+  sessionVersion: int("sessionVersion").default(1).notNull(),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
-});
+}, table => [
+  uniqueIndex("users_normalized_email_uq").on(table.normalizedEmail),
+  uniqueIndex("users_entra_subject_uq").on(table.entraTenantId, table.entraObjectId),
+]);
+
+export const userSessions = mysqlTable("user_sessions", {
+  id: int("id").autoincrement().primaryKey(),
+  tokenHash: varchar("tokenHash", { length: 64 }).notNull(),
+  csrfHash: varchar("csrfHash", { length: 64 }).notNull(),
+  userId: int("userId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  sessionVersion: int("sessionVersion").notNull(),
+  stage: mysqlEnum("stage", ["full", "password_change", "mfa_setup", "mfa_verify"]).default("full").notNull(),
+  authMethod: mysqlEnum("authMethod", ["local", "entra"]).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  lastSeenAt: timestamp("lastSeenAt").defaultNow().notNull(),
+  revokedAt: timestamp("revokedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [uniqueIndex("user_sessions_token_hash_uq").on(table.tokenHash), index("user_sessions_user_idx").on(table.userId)]);
+
+export const userRecoveryCodes = mysqlTable("user_recovery_codes", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  codeHash: varchar("codeHash", { length: 64 }).notNull(),
+  usedAt: timestamp("usedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [index("user_recovery_codes_user_idx").on(table.userId)]);
+
+export const authLoginTransactions = mysqlTable("auth_login_transactions", {
+  id: int("id").autoincrement().primaryKey(),
+  stateHash: varchar("stateHash", { length: 64 }).notNull(),
+  nonce: varchar("nonce", { length: 128 }).notNull(),
+  codeVerifier: varchar("codeVerifier", { length: 160 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  consumedAt: timestamp("consumedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [uniqueIndex("auth_login_transactions_state_hash_uq").on(table.stateHash), index("auth_login_transactions_expiry_idx").on(table.expiresAt)]);
 
 export const companies = mysqlTable(
   "companies",
@@ -111,7 +160,7 @@ export const recurringInvoiceSchedules = mysqlTable(
     dueDays: int("dueDays").default(30).notNull(),
     autoSend: boolean("autoSend").default(false).notNull(),
     isActive: boolean("isActive").default(true).notNull(),
-    heartbeatTaskUid: varchar("heartbeatTaskUid", { length: 160 }).notNull(),
+    schedulerKey: varchar("schedulerKey", { length: 160 }).notNull(),
     nextRunAt: timestamp("nextRunAt"),
     lastRunAt: timestamp("lastRunAt"),
     lastInvoiceId: int("lastInvoiceId"),
@@ -129,7 +178,7 @@ export const recurringInvoiceSchedules = mysqlTable(
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
   table => [
-    uniqueIndex("recurring_invoice_schedules_task_uq").on(table.heartbeatTaskUid),
+    uniqueIndex("recurring_invoice_schedules_task_uq").on(table.schedulerKey),
     uniqueIndex("recurring_invoice_schedules_company_prefix_uq").on(table.companyId, table.invoicePrefix),
     index("recurring_invoice_schedules_company_active_idx").on(table.companyId, table.isActive),
     index("recurring_invoice_schedules_contact_idx").on(table.contactId),

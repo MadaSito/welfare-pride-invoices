@@ -23,7 +23,6 @@ import {
   users,
   webhookEvents,
 } from "../drizzle/schema";
-import { ENV } from "./_core/env";
 
 export const DEFAULT_WELFARE_LOGO_KEY = "welfare-pride-logo_82951fbd.png";
 export const DEFAULT_WELFARE_COMPANY_SLUG = "welfare-pride";
@@ -62,9 +61,6 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   if (user.role !== undefined) {
     values.role = user.role;
     updateSet.role = user.role;
-  } else if (user.openId === ENV.ownerOpenId) {
-    values.role = "admin";
-    updateSet.role = "admin";
   }
   await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
 }
@@ -94,9 +90,8 @@ export async function ensureDefaultTenantForUser(user: User) {
   }
   if (!company) throw new Error("Default company bootstrap failed");
 
-  // Only the platform-recorded project owner may establish the first default-tenant administrator.
-  // Other authenticated users fail closed until an administrator assigns a company membership.
-  if (user.openId === ENV.ownerOpenId) {
+  // Standalone global administrators receive the default tenant administrator role.
+  if (user.role === "admin") {
     await db.insert(companyMembers).values({
       companyId: company.id,
       userId: user.id,
@@ -259,7 +254,7 @@ export async function archiveCompany(companyId: number) {
     )).limit(1))[0];
     if (sendingInvoice) throw new Error("This company has an invoice delivery in progress. Reconcile or complete it before archiving.");
     const company = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
-    const schedules = await tx.select({ taskUid: recurringInvoiceSchedules.heartbeatTaskUid }).from(recurringInvoiceSchedules).where(and(
+    const schedules = await tx.select({ taskUid: recurringInvoiceSchedules.schedulerKey }).from(recurringInvoiceSchedules).where(and(
       eq(recurringInvoiceSchedules.companyId, companyId),
       eq(recurringInvoiceSchedules.isActive, true),
     ));
@@ -486,7 +481,7 @@ export function hasRecurringSeriesPrefixConflict(existingPrefixes: string[], can
 export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemplateInput & {
   companyId: number;
   createdByUserId: number;
-  heartbeatTaskUid: string;
+  schedulerKey: string;
   nextRunAt?: Date | null;
 }) {
   const db = await requireDb();
@@ -517,7 +512,7 @@ export async function createRecurringInvoiceSchedule(input: RecurringInvoiceTemp
       minuteUtc: input.minuteUtc,
       dueDays: input.dueDays,
       autoSend: input.autoSend,
-      heartbeatTaskUid: input.heartbeatTaskUid,
+      schedulerKey: input.schedulerKey,
       nextRunAt: input.nextRunAt ?? null,
       currency: input.currency.toUpperCase(),
       invoicePrefix: prefix,
@@ -575,7 +570,7 @@ export async function getRecurringInvoiceScheduleByTaskUid(taskUid: string) {
     .from(recurringInvoiceSchedules)
     .innerJoin(companies, eq(companies.id, recurringInvoiceSchedules.companyId))
     .innerJoin(contacts, eq(contacts.id, recurringInvoiceSchedules.contactId))
-    .where(eq(recurringInvoiceSchedules.heartbeatTaskUid, taskUid))
+    .where(eq(recurringInvoiceSchedules.schedulerKey, taskUid))
     .limit(1);
   if (!result[0]) return null;
   const lineItems = await db.select().from(recurringInvoiceLineItems).where(eq(recurringInvoiceLineItems.scheduleId, result[0].schedule.id)).orderBy(asc(recurringInvoiceLineItems.position));

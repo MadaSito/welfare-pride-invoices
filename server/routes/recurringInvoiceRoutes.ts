@@ -12,7 +12,7 @@ import {
   recurringOccurrenceKey,
 } from "../db";
 import { deliverFinalizedInvoice, InvoiceDeliveryError } from "../services/invoiceDelivery";
-import { sdk } from "../_core/sdk";
+import { ENV } from "../_core/env";
 
 function correlationId(res: Response) {
   return typeof res.locals.correlationId === "string" ? res.locals.correlationId : crypto.randomUUID();
@@ -59,31 +59,23 @@ export function nextFutureScheduledRunAt(schedule: Parameters<typeof nextSchedul
   return next;
 }
 
-/**
- * Platform Heartbeat calls this route with an app_session_id JWT. The task UID is
- * resolved through sdk.authenticateRequest and is the only schedule identifier
- * accepted here; request body values are intentionally ignored.
- */
+/** Hostinger cron calls this route with the configured scheduler secret and the
+ * durable schedule key. The key is looked up server-side; body identifiers are ignored. */
 export function registerRecurringInvoiceScheduledRoutes(app: Express) {
-  app.post("/api/scheduled/recurring-invoices", async (req: Request, res: Response) => {
+  app.post("/api/internal/cron/recurring-invoices", async (req: Request, res: Response) => {
     const id = correlationId(res);
     let scheduleId: number | null = null;
     let companyId: number | null = null;
     let occurrenceKey: string | null = null;
     let createdByUserId: number | null = null;
-    let schedulerIdentity: Awaited<ReturnType<typeof sdk.authenticateRequest>>;
-    try {
-      schedulerIdentity = await sdk.authenticateRequest(req);
-    } catch {
-      res.status(401).json({ error: "Authenticated scheduler identity is required.", correlationId: id });
-      return;
-    }
-    if (!schedulerIdentity.isCron || !schedulerIdentity.taskUid) {
+    const secret = req.header("x-wp-scheduler-secret") ?? "";
+    const taskUid = req.header("x-wp-schedule-key") ?? "";
+    if (!ENV.schedulerSecret || !taskUid || secret.length !== ENV.schedulerSecret.length || !crypto.timingSafeEqual(Buffer.from(secret), Buffer.from(ENV.schedulerSecret))) {
       res.status(401).json({ error: "Authenticated scheduler identity is required.", correlationId: id });
       return;
     }
     try {
-      const bundle = await getRecurringInvoiceScheduleByTaskUid(schedulerIdentity.taskUid);
+      const bundle = await getRecurringInvoiceScheduleByTaskUid(taskUid);
       if (!bundle) {
         // A deleted business row can outlive a platform cancellation momentarily.
         res.status(200).json({ accepted: true, skipped: "schedule_not_found", correlationId: id });

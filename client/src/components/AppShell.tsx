@@ -1,6 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { startLogin } from "@/const";
 import { cn } from "@/lib/utils";
 import {
   Bell,
@@ -39,6 +38,13 @@ function BrandMark({ inverse = false }: { inverse?: boolean }) {
 }
 
 function LoginScreen() {
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [step, setStep] = useState<"login" | "password_change" | "mfa_setup" | "mfa_verify" | "recovery">("login"); const [code, setCode] = useState(""); const [setup, setSetup] = useState<{ secret: string; otpauthUri: string } | null>(null); const [recovery, setRecovery] = useState<string[]>([]); const [message, setMessage] = useState(""); const [busy, setBusy] = useState(false);
+  const request = async (url: string, body?: Record<string, string>) => { const response = await fetch(url, { method: body ? "POST" : "GET", credentials: "include", headers: body ? { "content-type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || "Authentication failed."); return data; };
+  const enroll = async () => { const result = await request("/api/auth/mfa/setup"); setSetup(result); setStep("mfa_setup"); };
+  const signIn = async () => { setBusy(true); setMessage(""); try { const result = await request("/api/auth/login", { email, password }); if (result.next === "full") window.location.reload(); else if (result.next === "mfa_setup") await enroll(); else setStep(result.next); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to sign in."); } finally { setBusy(false); } };
+  const changePassword = async () => { setBusy(true); try { await request("/api/auth/change-password", { password }); await enroll(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to change password."); } finally { setBusy(false); } };
+  const confirmMfa = async () => { setBusy(true); try { const result = await request("/api/auth/mfa/confirm", { code }); setRecovery(result.recoveryCodes ?? []); setStep("recovery"); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to confirm MFA."); } finally { setBusy(false); } };
+  const verifyMfa = async () => { setBusy(true); try { await request("/api/auth/mfa/verify", { code }); window.location.reload(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to verify MFA."); } finally { setBusy(false); } };
   return (
     <main className="login-stage">
       <section className="login-panel">
@@ -46,8 +52,12 @@ function LoginScreen() {
         <span className="eyebrow">Secure invoice workspace</span>
         <h1>Every invoice, delivered with care.</h1>
         <p>Build branded PDF invoices, manage delivery securely, and retain a trustworthy audit trail for every send.</p>
-        <button className="button button-primary button-wide" onClick={() => startLogin()}>Sign in securely</button>
-        <p className="login-caption"><ShieldCheck size={15} /> Your session is validated before any company data is shown.</p>
+        {step === "login" && <><label className="form-field"><span>Email</span><input className="field-input" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></label><label className="form-field"><span>Password</span><input className="field-input" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={signIn}>{busy ? "Signing in…" : "Sign in"}</button><a className="button button-secondary button-wide" href="/api/auth/entra/login">Sign in with Microsoft Entra ID</a></>}
+        {step === "password_change" && <><h2>Set your permanent password</h2><p>Your temporary password must be changed before access is granted.</p><label className="form-field"><span>New password</span><input className="field-input" type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={changePassword}>Save password</button></>}
+        {step === "mfa_setup" && <><h2>Set up authenticator MFA</h2><p>Add this secret to Microsoft Authenticator, Google Authenticator, or another TOTP app, then enter the six-digit code.</p><code className="auth-secret">{setup?.secret}</code><label className="form-field"><span>Authenticator code</span><input className="field-input" inputMode="numeric" value={code} onChange={event => setCode(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy || !setup} onClick={confirmMfa}>Verify and continue</button></>}
+        {step === "mfa_verify" && <><h2>Verify MFA</h2><p>Enter your six-digit authenticator code or an unused recovery code.</p><label className="form-field"><span>Verification code</span><input className="field-input" inputMode="numeric" value={code} onChange={event => setCode(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={verifyMfa}>Verify and continue</button></>}
+        {step === "recovery" && <><h2>Save recovery codes</h2><p>Store these one-time codes securely. They are shown only once.</p><code className="auth-secret">{recovery.join("\n")}</code><button className="button button-primary button-wide" onClick={() => window.location.reload()}>I saved my codes</button></>}
+        {message && <p className="auth-error">{message}</p>}<p className="login-caption"><ShieldCheck size={15} /> Application-owned sessions and MFA protect every company workspace.</p>
       </section>
       <aside className="login-aside">
         <div className="dot-pattern" />
