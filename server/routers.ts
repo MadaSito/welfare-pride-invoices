@@ -21,6 +21,7 @@ import {
   getDashboardMetrics,
   getEmailProviderConfig,
   getInvoiceBundle,
+  getPendingRecurringReview,
   getRecurringInvoiceSchedule,
   listCompanyMembers,
   listArchivedCompaniesForUser,
@@ -360,6 +361,38 @@ export const appRouter = router({
       } catch (error) {
         try { await deleteHeartbeatJob(task.taskUid, ""); } catch { /* Orphan prevention is best effort; platform task has no business identifier in its payload. */ }
         throw error;
+      }
+    }),
+    generateForReview: protectedProcedure.input(companyIdInput.extend({ scheduleId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const existing = await getPendingRecurringReview(input.companyId, input.scheduleId);
+      if (existing) return { invoice: existing, reused: true };
+      const schedule = await getRecurringInvoiceSchedule(input.companyId, input.scheduleId);
+      if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring schedule not found." });
+      if (!schedule.schedule.isActive) throw new TRPCError({ code: "BAD_REQUEST", message: "Resume this recurring schedule before generating an invoice for review." });
+      const issueDate = new Date();
+      const dueDate = new Date(issueDate);
+      dueDate.setUTCDate(dueDate.getUTCDate() + schedule.schedule.dueDays);
+      try {
+        const invoice = await createInvoice(input.companyId, ctx.user.id, {
+          contactId: schedule.schedule.contactId,
+          currency: schedule.schedule.currency,
+          issueDate,
+          dueDate,
+          taxRateBps: schedule.schedule.taxRateBps,
+          discountRateBps: schedule.schedule.discountRateBps,
+          notes: schedule.schedule.notes,
+          terms: schedule.schedule.terms,
+          paymentInstructions: schedule.schedule.paymentInstructions,
+          lineItems: schedule.lineItems.map(item => ({ description: item.description, quantity: item.quantity, unitPriceCents: item.unitPriceCents, taxable: item.taxable })),
+          initialStatus: "awaiting_approval",
+          recurringScheduleId: schedule.schedule.id,
+          recurringOccurrenceKey: `manual-review-${crypto.randomUUID()}`,
+        });
+        await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.manual_review_generated", resourceType: "invoice", resourceId: String(invoice?.invoice.id), outcome: "success", metadata: { scheduleId: input.scheduleId } });
+        return { invoice, reused: false };
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The review invoice could not be generated." });
       }
     }),
     setActive: protectedProcedure.input(companyIdInput.extend({ scheduleId: z.number().int().positive(), isActive: z.boolean() })).mutation(async ({ ctx, input }) => {

@@ -558,6 +558,16 @@ export async function getRecurringInvoiceSchedule(companyId: number, scheduleId:
   return { ...result[0], lineItems };
 }
 
+export async function getPendingRecurringReview(companyId: number, scheduleId: number) {
+  const db = await requireDb();
+  const invoice = (await db.select({ id: invoices.id }).from(invoices).where(and(
+    eq(invoices.companyId, companyId),
+    eq(invoices.recurringScheduleId, scheduleId),
+    eq(invoices.status, "awaiting_approval"),
+  )).orderBy(desc(invoices.createdAt)).limit(1))[0];
+  return invoice ? getInvoiceBundle(companyId, invoice.id) : null;
+}
+
 export async function getRecurringInvoiceScheduleByTaskUid(taskUid: string) {
   const db = await requireDb();
   const result = await db
