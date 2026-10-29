@@ -387,12 +387,14 @@ export const appRouter = router({
           lineItems: schedule.lineItems.map(item => ({ description: item.description, quantity: item.quantity, unitPriceCents: item.unitPriceCents, taxable: item.taxable })),
           initialStatus: "awaiting_approval",
           recurringScheduleId: schedule.schedule.id,
-          recurringOccurrenceKey: `manual-review-${crypto.randomUUID()}`,
+          // Must remain within recurringOccurrenceKey's 48-character bound.
+          recurringOccurrenceKey: `manual-${crypto.randomUUID()}`,
         });
         await audit(ctx, { companyId: input.companyId, eventType: "recurring_invoice.manual_review_generated", resourceType: "invoice", resourceId: String(invoice?.invoice.id), outcome: "success", metadata: { scheduleId: input.scheduleId } });
         return { invoice, reused: false };
       } catch (error) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The review invoice could not be generated." });
+        console.error("Manual recurring review generation failed", error instanceof Error ? error.message : "unknown error");
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "The review invoice could not be generated. No invoice was created; please try again or contact an administrator if the issue continues." });
       }
     }),
     setActive: protectedProcedure.input(companyIdInput.extend({ scheduleId: z.number().int().positive(), isActive: z.boolean() })).mutation(async ({ ctx, input }) => {
