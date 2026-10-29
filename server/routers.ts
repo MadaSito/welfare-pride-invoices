@@ -30,6 +30,7 @@ import {
   listRecurringInvoiceSchedules,
   reconcileUncertainInvoiceDelivery,
   restoreCompany,
+  setCompanyInvoiceSequence,
   setRecurringInvoiceScheduleActive,
   saveEmailProviderConfig,
   setCompanyLogoKey,
@@ -56,6 +57,7 @@ const companyIdInput = z.object({ companyId: z.number().int().positive() });
 const color = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Use a six-digit hex color.");
 const date = z.coerce.date();
 const optionalText = (max: number) => z.string().trim().max(max).optional().nullable();
+const invoicePrefix = z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,24}$/, "Use 1–24 letters or numbers for the invoice prefix.").refine(value => value !== "DRAFT", "DRAFT is reserved for provisional documents.");
 const lineItemInput = z.object({
   description: z.string().trim().min(1).max(500),
   quantity: z.number().int().min(1).max(1_000_000),
@@ -79,7 +81,7 @@ const recurringInvoiceInput = z.object({
   companyId: z.number().int().positive(),
   name: z.string().trim().min(2).max(160),
   contactId: z.number().int().positive(),
-  invoicePrefix: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,24}$/, "Use 1–24 letters or numbers for the recurring invoice prefix.").refine(value => value !== "DRAFT", "DRAFT is reserved for provisional documents."),
+  invoicePrefix,
   nextInvoiceSequence: z.number().int().min(1).max(99_999_999),
   cadence: z.enum(["daily", "weekly", "monthly", "semiannual", "yearly"]),
   dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
@@ -236,13 +238,22 @@ export const appRouter = router({
       legalName: optionalText(220), email: z.string().email().optional().nullable(), phone: optionalText(64), website: optionalText(320),
       addressLine1: optionalText(220), addressLine2: optionalText(220), city: optionalText(120), region: optionalText(120), postalCode: optionalText(32), country: z.string().trim().length(2).optional().nullable(),
       primaryColor: color, accentColor: color, footerText: optionalText(1000), defaultBcc: z.string().email().optional().nullable(),
-      logoScale: z.number().int().min(50).max(160), logoAlignment: z.enum(["left", "right"]), invoicePrefix: z.string().trim().min(1).max(24),
+      logoScale: z.number().int().min(50).max(160), logoAlignment: z.enum(["left", "right"]), invoicePrefix,
     })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
       const { companyId, ...update } = input;
       const company = await updateCompanyBranding(companyId, update);
       await audit(ctx, { companyId, eventType: "company.branding.updated", resourceType: "company", resourceId: String(companyId), outcome: "success" });
       return company;
+    }),
+    setInvoiceSequence: protectedProcedure.input(companyIdInput.extend({ nextInvoiceSequence: z.number().int().min(1).max(99_999_999) })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const result = await setCompanyInvoiceSequence(input.companyId, input.nextInvoiceSequence, { actorUserId: ctx.user.id, correlationId: getCorrelationId(ctx) });
+        return result.company;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The company one-off invoice sequence could not be updated." });
+      }
     }),
     archive: protectedProcedure.input(companyIdInput).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
@@ -362,7 +373,7 @@ export const appRouter = router({
     }),
     setInvoiceSequence: protectedProcedure.input(companyIdInput.extend({
       scheduleId: z.number().int().positive(),
-      invoicePrefix: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{1,24}$/, "Use 1–24 letters or numbers for the recurring invoice prefix.").refine(value => value !== "DRAFT", "DRAFT is reserved for provisional documents."),
+      invoicePrefix,
       nextInvoiceSequence: z.number().int().min(1).max(99_999_999),
     })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
@@ -435,6 +446,16 @@ export const appRouter = router({
       if (invoice.invoice.status !== "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Only draft invoices can be finalized." });
       const updated = await setInvoiceStatus(input.companyId, input.invoiceId, "finalized", "draft");
       await audit(ctx, { companyId: input.companyId, eventType: "invoice.finalized", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success" });
+      return updated;
+    }),
+    approveRecurring: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "company_creator");
+      const invoice = await getInvoiceBundle(input.companyId, input.invoiceId);
+      if (!invoice) throw new TRPCError({ code: "NOT_FOUND", message: "Invoice not found." });
+      if (!invoice.invoice.recurringScheduleId || invoice.invoice.status !== "awaiting_approval") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Only generated recurring invoices awaiting approval can be approved." });
+      }
+      const updated = await setInvoiceStatus(input.companyId, input.invoiceId, "finalized", "awaiting_approval", { actorUserId: ctx.user.id, correlationId: getCorrelationId(ctx), eventType: "recurring_invoice.approved", metadata: { scheduleId: invoice.invoice.recurringScheduleId } });
       return updated;
     }),
     send: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {

@@ -205,6 +205,42 @@ export async function updateCompanyBranding(companyId: number, input: {
   return getCompanyById(companyId);
 }
 
+/** Set the next company-wide number used only by one-off (non-recurring) invoices. */
+export async function setCompanyInvoiceSequence(companyId: number, nextInvoiceSequence: number, audit?: { actorUserId: number; correlationId: string }) {
+  const db = await requireDb();
+  return db.transaction(async tx => {
+    const company = (await tx.select().from(companies).where(and(eq(companies.id, companyId), isNull(companies.archivedAt))).limit(1))[0];
+    if (!company) throw new Error("Active company not found");
+    const previousNextSequence = company.invoiceSequence + 1;
+    const allocated = (await tx.select({ id: invoices.id }).from(invoices).where(and(
+      eq(invoices.companyId, companyId),
+      isNull(invoices.recurringScheduleId),
+      sql`${invoices.invoiceNumber} NOT LIKE 'DRAFT-%'`,
+    )).limit(1))[0];
+    if (allocated && nextInvoiceSequence < previousNextSequence) {
+      throw new Error(`The next company sequence cannot move backward from ${previousNextSequence} after one-off invoices have received numbers.`);
+    }
+    const result = await tx.update(companies).set({ invoiceSequence: nextInvoiceSequence - 1 }).where(and(
+      eq(companies.id, companyId),
+      eq(companies.invoiceSequence, company.invoiceSequence),
+      isNull(companies.archivedAt),
+    ));
+    if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Company sequence changed before this update could be completed.");
+    if (audit) await tx.insert(auditLogs).values({
+      companyId,
+      actorUserId: audit.actorUserId,
+      eventType: "company.one_off_series.migrated",
+      resourceType: "company",
+      resourceId: String(companyId),
+      outcome: "success",
+      correlationId: audit.correlationId,
+      metadataJson: JSON.stringify({ previousNextSequence, nextInvoiceSequence, hasAllocatedInvoice: Boolean(allocated) }),
+    });
+    const updated = (await tx.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+    return { company: updated, previousNextSequence, hasAllocatedInvoice: Boolean(allocated) };
+  });
+}
+
 export async function setCompanyLogoKey(companyId: number, logoKey: string) {
   const db = await requireDb();
   await db.update(companies).set({ logoKey }).where(eq(companies.id, companyId));
@@ -308,7 +344,7 @@ export async function createInvoice(companyId: number, createdByUserId: number, 
   terms?: string | null;
   paymentInstructions?: string | null;
   lineItems: InvoiceLineInput[];
-  initialStatus?: "draft" | "finalized";
+  initialStatus?: "draft" | "awaiting_approval" | "finalized";
   recurringScheduleId?: number | null;
   recurringOccurrenceKey?: string | null;
 }) {
@@ -714,7 +750,7 @@ export async function getInvoiceBundle(companyId: number, invoiceId: number) {
   return { ...result[0], lineItems };
 }
 
-export async function setInvoiceStatus(companyId: number, invoiceId: number, status: "finalized" | "sending" | "sent" | "paid" | "void", expectedCurrentStatus: InvoiceStatus) {
+export async function setInvoiceStatus(companyId: number, invoiceId: number, status: "finalized" | "sending" | "sent" | "paid" | "void", expectedCurrentStatus: InvoiceStatus, audit?: { actorUserId: number; correlationId: string; eventType: string; metadata?: Record<string, unknown> }) {
   const db = await requireDb();
   const now = new Date();
   await db.transaction(async tx => {
@@ -727,6 +763,16 @@ export async function setInvoiceStatus(companyId: number, invoiceId: number, sta
       ...(status === "paid" ? { paidAt: now } : {}),
     }).where(and(eq(invoices.id, invoiceId), eq(invoices.companyId, companyId), eq(invoices.status, expectedCurrentStatus)));
     if (Number((result as any)[0]?.affectedRows ?? 0) !== 1) throw new Error("Invoice state changed before this action could be completed");
+    if (audit) await tx.insert(auditLogs).values({
+      companyId,
+      actorUserId: audit.actorUserId,
+      eventType: audit.eventType,
+      resourceType: "invoice",
+      resourceId: String(invoiceId),
+      outcome: "success",
+      correlationId: audit.correlationId,
+      metadataJson: audit.metadata ? JSON.stringify(audit.metadata) : null,
+    });
   });
   return getInvoiceBundle(companyId, invoiceId);
 }

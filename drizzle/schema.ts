@@ -143,7 +143,7 @@ export const invoices = mysqlTable(
     companyId: int("companyId").notNull().references(() => companies.id, { onDelete: "cascade" }),
     contactId: int("contactId").notNull().references(() => contacts.id),
     invoiceNumber: varchar("invoiceNumber", { length: 64 }).notNull(),
-    status: mysqlEnum("status", ["draft", "finalized", "sending", "sent", "paid", "void"])
+    status: mysqlEnum("status", ["draft", "awaiting_approval", "finalized", "sending", "sent", "paid", "void"])
       .default("draft")
       .notNull(),
     currency: varchar("currency", { length: 3 }).default("USD").notNull(),
@@ -305,7 +305,7 @@ export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 export type Company = typeof companies.$inferSelect;
 export type CompanyMemberRole = "platform_admin" | "company_creator" | "company_viewer";
-export type InvoiceStatus = "draft" | "finalized" | "sending" | "sent" | "paid" | "void";
+export type InvoiceStatus = "draft" | "awaiting_approval" | "finalized" | "sending" | "sent" | "paid" | "void";
 export type EmailProvider = "microsoft_graph" | "smtp";
 export type RecurringInvoiceCadence = "daily" | "weekly" | "monthly" | "semiannual" | "yearly";
 export type RecurringInvoiceRunStatus = "running" | "created" | "sent" | "failed" | "uncertain";

@@ -135,7 +135,7 @@ export function registerRecurringInvoiceScheduledRoutes(app: Express) {
             unitPriceCents: item.unitPriceCents,
             taxable: item.taxable,
           })),
-          initialStatus: "finalized",
+          initialStatus: schedule.autoSend ? "finalized" : "awaiting_approval",
           recurringScheduleId: schedule.id,
           recurringOccurrenceKey: occurrenceKey,
         });
@@ -145,7 +145,7 @@ export function registerRecurringInvoiceScheduledRoutes(app: Express) {
       await linkRecurringInvoiceRun(schedule.id, occurrenceKey, invoice.invoice.id);
       await recordRecurringInvoiceExecution(schedule.companyId, schedule.id, invoice.invoice.id, nextFutureScheduledRunAt(schedule, scheduledAt));
       if (!schedule.autoSend) {
-        await completeRecurringInvoiceRun(schedule.id, occurrenceKey, "created", { invoiceId: invoice.invoice.id, note: "Finalized for manual review and send." });
+        await completeRecurringInvoiceRun(schedule.id, occurrenceKey, "created", { invoiceId: invoice.invoice.id, note: "Created and awaiting explicit approval before delivery." });
         await createAuditLog({ companyId: schedule.companyId, actorUserId: schedule.createdByUserId, eventType: "recurring_invoice.created", resourceType: "invoice", resourceId: String(invoice.invoice.id), outcome: "success", correlationId: id, metadata: { scheduleId: schedule.id, occurrenceKey, autoSend: false } });
         res.status(200).json({ accepted: true, status: "created", invoiceId: invoice.invoice.id, correlationId: id });
         return;

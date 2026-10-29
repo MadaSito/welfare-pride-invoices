@@ -1,6 +1,6 @@
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { trpc } from "@/lib/trpc";
-import { AlertTriangle, ImageUp, MapPin, Palette, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Hash, ImageUp, MapPin, Palette, Save, ShieldCheck } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -48,9 +48,11 @@ export default function Branding() {
   const utils = trpc.useUtils();
   const query = trpc.company.get.useQuery({ companyId: activeCompany?.id ?? 0 }, { enabled: Boolean(activeCompany) });
   const [form, setForm] = useState<BrandForm>(blank);
+  const [nextOneOffSequence, setNextOneOffSequence] = useState("1001");
   useEffect(() => {
     if (query.data) {
       setForm(fromCompany(query.data));
+      setNextOneOffSequence(String((query.data.invoiceSequence ?? 1000) + 1));
     }
   }, [query.data]);
   const canAdminister = isPlatformAdmin || activeCompany?.memberRole === "platform_admin";
@@ -61,6 +63,10 @@ export default function Branding() {
   });
   const upload = trpc.company.uploadLogo.useMutation({
     onSuccess: async () => { toast.success("Company logo uploaded. It will always retain its aspect ratio in PDFs."); await refresh(); utils.company.get.invalidate(); },
+    onError: error => toast.error(error.message),
+  });
+  const updateOneOffSequence = trpc.company.setInvoiceSequence.useMutation({
+    onSuccess: async () => { toast.success("Next company one-off invoice number saved."); await refresh(); utils.company.get.invalidate(); },
     onError: error => toast.error(error.message),
   });
 
@@ -83,6 +89,14 @@ export default function Branding() {
     footerText: form.footerText || null,
     defaultBcc: form.defaultBcc || null,
   });
+
+  const saveOneOffSequence = () => {
+    const next = Number(nextOneOffSequence);
+    if (!Number.isSafeInteger(next) || next < 1 || next > 99_999_999) { toast.error("Enter a whole next invoice number between 1 and 99,999,999."); return; }
+    if (window.confirm(`Set the next company one-off invoice number to ${form.invoicePrefix}-${new Date().getUTCFullYear()}-${String(next).padStart(4, "0")}? This does not change recurring project invoice series.`)) {
+      updateOneOffSequence.mutate({ companyId: activeCompany.id, nextInvoiceSequence: next });
+    }
+  };
 
   const selectLogo = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -118,6 +132,11 @@ export default function Branding() {
             <div className="form-field"><label>Website</label><input className="field-input" value={form.website} onChange={event => setForm({ ...form, website: event.target.value })} /></div>
             <div className="form-field"><label>Invoice number prefix</label><input className="field-input" maxLength={24} value={form.invoicePrefix} onChange={event => setForm({ ...form, invoicePrefix: event.target.value.toUpperCase() })} /></div>
           </div></div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header"><div><h2>Company one-off invoice series</h2><p>Controls invoices created outside a recurring project or schedule.</p></div></div>
+          <div className="panel-body"><div className="recurring-series-setup"><Hash size={18} /><div><strong>Next company one-off invoice number</strong><p>After an external one-off invoice <code>{form.invoicePrefix || "INV"}-{new Date().getUTCFullYear()}-2500</code>, enter <strong>2501</strong>. This never changes any recurring project’s separate series.</p></div><div className="recurring-series-fields"><label>Next number<input className="field-input" type="number" min="1" max="99999999" value={nextOneOffSequence} onChange={event => setNextOneOffSequence(event.target.value)} /></label><span>Next: <strong>{form.invoicePrefix || "INV"}-{new Date().getUTCFullYear()}-{String(Number(nextOneOffSequence) || 1).padStart(4, "0")}</strong></span><button className="button button-secondary" disabled={updateOneOffSequence.isPending} onClick={saveOneOffSequence}>{updateOneOffSequence.isPending ? "Saving…" : "Save next number"}</button></div></div></div>
         </section>
 
         <section className="panel">
