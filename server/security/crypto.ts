@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 function getKey() {
   const value = process.env.APP_CONFIG_ENCRYPTION_KEY;
-  if (!value) throw new Error("Email configuration encryption is not configured. Set APP_CONFIG_ENCRYPTION_KEY before saving provider credentials.");
+  if (!value) throw new Error("The server security key is not configured. Set APP_CONFIG_ENCRYPTION_KEY before enrolling MFA or saving delivery credentials.");
   const base64Key = Buffer.from(value, "base64");
   const hexKey = Buffer.from(value, "hex");
   const key = base64Key.length === 32 ? base64Key : hexKey.length === 32 ? hexKey : null;
