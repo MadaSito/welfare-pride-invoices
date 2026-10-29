@@ -49,7 +49,7 @@ import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
 import { requireCompanyArchiveAdministrator, requireCompanyProvisioner, requireCompanyRole } from "./security/access";
-import { createManagedUser, listManagedUsers, logout as logoutStandalone, resetManagedMfa, resetManagedPassword, revokeManagedSessions, setManagedUserStatus } from "./auth/service";
+import { completeInitialSetup, createManagedUser, getInitialSetupStatus, listManagedUsers, logout as logoutStandalone, resetManagedMfa, resetManagedPassword, revokeManagedSessions, saveEntraConfiguration, setManagedUserStatus } from "./auth/service";
 import { createLocalSchedule, removeLocalSchedule, updateLocalSchedule } from "./scheduler/local";
 
 const companyIdInput = z.object({ companyId: z.number().int().positive() });
@@ -515,6 +515,31 @@ export const appRouter = router({
       } catch (error) {
         throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "The uncertain delivery could not be reconciled." });
       }
+    }),
+  }),
+
+  setup: router({
+    status: adminProcedure.query(async () => ({ ...(await getInitialSetupStatus()), encryptionReady: isEncryptionConfigured() })),
+    saveWelfarePrideSso: adminProcedure.input(z.object({
+      tenantId: z.string().trim().min(1).max(160),
+      clientId: z.string().trim().min(1).max(160),
+      clientSecret: z.string().max(4096).optional(),
+    })).mutation(async ({ ctx, input }) => {
+      if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The server security key must be configured before SSO credentials can be encrypted." });
+      try {
+        await saveEntraConfiguration(input, ctx.user.id);
+        await audit(ctx, { eventType: "sso.configuration.saved", resourceType: "application_setting", resourceId: "welfare_pride_sso", outcome: "success" });
+        return { saved: true };
+      } catch (error) {
+        await audit(ctx, { eventType: "sso.configuration.save.failed", resourceType: "application_setting", resourceId: "welfare_pride_sso", outcome: "failure" });
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Unable to save Welfare Pride SSO configuration." });
+      }
+    }),
+    completeInitialSetup: adminProcedure.mutation(async ({ ctx }) => {
+      if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Configure the server security key before completing initial setup." });
+      await completeInitialSetup(ctx.user.id);
+      await audit(ctx, { eventType: "initial_setup.completed", resourceType: "application_setting", resourceId: "initial_setup_complete", outcome: "success" });
+      return { complete: true };
     }),
   }),
 

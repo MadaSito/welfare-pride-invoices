@@ -40,7 +40,7 @@ Entra sign-in is optional. To enable it, create a confidential web application a
 https://your-domain.example/api/auth/entra/callback
 ```
 
-Set `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, and `ENTRA_CLIENT_SECRET`. The app uses Authorization Code with PKCE, validates state, nonce, issuer, tenant, audience, and JWKS signatures. A platform administrator must first provision an Entra user by email in **Security & access**; a valid Entra token alone never creates a company role or invoice access.
+During the first full platform-administrator login, the setup assistant prompts for Welfare Pride SSO configuration. It stores the tenant ID, client ID, and client secret encrypted at rest from **Security & access**. Alternatively, set `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, and `ENTRA_CLIENT_SECRET` as Hostinger environment variables for immutable infrastructure-managed configuration. The app uses Authorization Code with PKCE, validates state, nonce, issuer, tenant, audience, and JWKS signatures. A platform administrator must first provision an SSO user by email in **Security & access**; a valid Entra token alone never creates a company role or invoice access.
 
 ## Local authentication and MFA
 

@@ -1,6 +1,7 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { cn } from "@/lib/utils";
+import { trpc } from "@/lib/trpc";
 import {
   Bell,
   Building2,
@@ -52,7 +53,7 @@ function LoginScreen() {
         <span className="eyebrow">Secure invoice workspace</span>
         <h1>Every invoice, delivered with care.</h1>
         <p>Build branded PDF invoices, manage delivery securely, and retain a trustworthy audit trail for every send.</p>
-        {step === "login" && <><label className="form-field"><span>Email</span><input className="field-input" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></label><label className="form-field"><span>Password</span><input className="field-input" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={signIn}>{busy ? "Signing in…" : "Sign in"}</button><a className="button button-secondary button-wide" href="/api/auth/entra/login">Sign in with Microsoft Entra ID</a></>}
+        {step === "login" && <><label className="form-field"><span>Email</span><input className="field-input" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></label><label className="form-field"><span>Password</span><input className="field-input" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={signIn}>{busy ? "Signing in…" : "Sign in"}</button><a className="button button-secondary button-wide" href="/api/auth/entra/login">Sign in with Welfare Pride Single Sign On (SSO)</a></>}
         {step === "password_change" && <><h2>Set your permanent password</h2><p>Your temporary password must be changed before access is granted.</p><label className="form-field"><span>New password</span><input className="field-input" type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={changePassword}>Save password</button></>}
         {step === "mfa_setup" && <><h2>Set up authenticator MFA</h2><p>Add this secret to Microsoft Authenticator, Google Authenticator, or another TOTP app, then enter the six-digit code.</p>{setup ? <><code className="auth-secret">{setup.secret}</code><label className="form-field"><span>Authenticator code</span><input className="field-input" inputMode="numeric" value={code} onChange={event => setCode(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={confirmMfa}>Verify and continue</button></> : <button className="button button-primary button-wide" disabled={busy} onClick={enroll}>{busy ? "Preparing MFA…" : "Prepare authenticator setup"}</button>}</>}
         {step === "mfa_verify" && <><h2>Verify MFA</h2><p>Enter your six-digit authenticator code or an unused recovery code.</p><label className="form-field"><span>Verification code</span><input className="field-input" inputMode="numeric" value={code} onChange={event => setCode(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={verifyMfa}>Verify and continue</button></>}
@@ -68,6 +69,25 @@ function LoginScreen() {
       </aside>
     </main>
   );
+}
+
+function InitialSetupAssistant() {
+  const setup = trpc.setup.status.useQuery(undefined, { retry: false });
+  const utils = trpc.useUtils(); const [, setLocation] = useLocation();
+  const complete = trpc.setup.completeInitialSetup.useMutation({ onSuccess: () => utils.setup.status.invalidate() });
+  if (!setup.data || setup.data.complete) return null;
+  return <section className="notice notice-info" style={{ margin: "0 0 20px", alignItems: "flex-start" }}>
+    <ShieldCheck size={19} style={{ marginTop: 2, flex: "0 0 auto" }} />
+    <div style={{ width: "100%" }}><strong>Initial administrator setup</strong><p style={{ margin: "5px 0 13px" }}>Finish the essential Welfare Pride configuration before inviting staff or issuing invoices. SSO and email delivery are optional, but are prompted here so they can be configured deliberately.</p>
+      <div className="inline-actions" style={{ flexWrap: "wrap" }}>
+        <button className="button button-secondary" onClick={() => setLocation("/branding")}>Configure branding</button>
+        <button className="button button-secondary" onClick={() => setLocation("/security")}>{setup.data.ssoConfigured ? "Review Welfare Pride SSO" : "Configure Welfare Pride SSO"}</button>
+        <button className="button button-secondary" onClick={() => setLocation("/delivery")}>Configure Graph or SMTP mail</button>
+        <button className="button button-primary" disabled={complete.isPending || !setup.data.encryptionReady} onClick={() => complete.mutate()}>{complete.isPending ? "Completing…" : "Mark initial setup complete"}</button>
+      </div>
+      {!setup.data.encryptionReady && <small style={{ display: "block", marginTop: 10 }}>The server security key must be configured before setup can be completed.</small>}
+    </div>
+  </section>;
 }
 
 function NavLink({ href, label, icon: Icon, active }: { href: string; label: string; icon: React.ElementType; active: boolean }) {
@@ -125,7 +145,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             {activeCompany && allNavigation.some(item => item.href === "/invoices") && <Link href="/invoices/new" className="button button-primary topbar-new"><FilePlus2 size={17} />New invoice</Link>}
           </div>
         </header>
-        <main className="content-shell">{children}</main>
+        <main className="content-shell">{user.role === "admin" && <InitialSetupAssistant />}{children}</main>
       </div>
     </div>
   );

@@ -72,6 +72,15 @@ export const authLoginTransactions = mysqlTable("auth_login_transactions", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, table => [uniqueIndex("auth_login_transactions_state_hash_uq").on(table.stateHash), index("auth_login_transactions_expiry_idx").on(table.expiresAt)]);
 
+/** Global, administrator-only configuration. Sensitive JSON values are AES-GCM encrypted. */
+export const applicationSettings = mysqlTable("application_settings", {
+  key: varchar("key", { length: 96 }).primaryKey(),
+  encryptedValue: text("encryptedValue"),
+  updatedByUserId: int("updatedByUserId").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
 export const companies = mysqlTable(
   "companies",
   {

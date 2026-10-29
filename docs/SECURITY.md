@@ -8,7 +8,7 @@ The bootstrap `admin@welfarepride.local` account starts with a generated one-tim
 
 ## Microsoft Entra ID
 
-Entra uses Authorization Code with PKCE, one-time hashed state, nonce validation, a fixed HTTPS callback, discovery/JWKS signature validation, and exact tenant, issuer, and audience checks. Users must be provisioned by a platform administrator before Entra sign-in; a token email never grants access. First sign-in links a stable tenant/object ID, and later mismatch fails closed. The customer Entra tenant remains authoritative for Entra MFA policy.
+The browser labels this path **Welfare Pride Single Sign On (SSO)**. Its Entra tenant ID, client ID, and client secret are either supplied as Hostinger environment values or encrypted in the administrator-only Security & access configuration panel. The first administrator setup checklist prompts for SSO, branding, and Graph/SMTP delivery before it is dismissed. Entra uses Authorization Code with PKCE, one-time hashed state, nonce validation, a fixed HTTPS callback, discovery/JWKS signature validation, and exact tenant, issuer, and audience checks. Users must be provisioned by a platform administrator before SSO sign-in; a token email never grants access. First sign-in links a stable tenant/object ID, and later mismatch fails closed. The customer Entra tenant remains authoritative for Entra MFA policy.
 
 ## User lifecycle and tenancy
 
