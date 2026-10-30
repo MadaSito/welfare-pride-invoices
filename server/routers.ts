@@ -55,7 +55,7 @@ import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_
 import { testProviderConnection, type ProviderConfig } from "./services/mailer";
 import { deliverFinalizedInvoice, InvoiceDeliveryError, resendDeliveredInvoice } from "./services/invoiceDelivery";
 import { validateEmailTemplate } from "./services/emailTemplates";
-import { buildBackupArchive, testBackupDestination, uploadBackupArchive, validateBackupDestination, type BackupDestinationConfig } from "./services/backups";
+import { buildBackupArchive, discoverSharePointSite, listSharePointFolders, testBackupDestination, uploadBackupArchive, validateBackupDestination, type BackupDestinationConfig, type SharePointDiscoveryCredentials } from "./services/backups";
 import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
@@ -166,11 +166,24 @@ const sharePointBackupConfigInput = z.object({
   tenantId: z.string().trim().max(160),
   clientId: z.string().trim().max(160),
   clientSecret: z.string().max(4096).optional().default(""),
+  siteUrl: z.string().trim().max(500).optional().default(""),
   siteId: z.string().trim().max(512),
   driveId: z.string().trim().max(512),
   folderPath: z.string().trim().max(500).optional().default("Welfare Pride Invoices Backups"),
 });
 const backupDestinationInput = z.object({ id: z.number().int().positive().optional(), label: z.string().trim().min(2).max(160), isActive: z.boolean().default(true), config: z.discriminatedUnion("provider", [s3BackupConfigInput, sharePointBackupConfigInput]) });
+const sharePointCredentialsInput = z.object({
+  destinationId: z.number().int().positive().optional(),
+  tenantId: z.string().trim().min(1).max(160),
+  clientId: z.string().trim().min(1).max(160),
+  clientSecret: z.string().max(4096).optional().default(""),
+});
+const sharePointDiscoveryInput = sharePointCredentialsInput.extend({ siteUrl: z.string().trim().min(8).max(500) });
+const sharePointFolderBrowseInput = sharePointCredentialsInput.extend({
+  siteId: z.string().trim().min(1).max(512),
+  driveId: z.string().trim().min(1).max(512),
+  folderPath: z.string().trim().max(500).optional().default(""),
+});
 
 function getCorrelationId(ctx: { res: { locals: Record<string, unknown> } }) {
   const value = ctx.res.locals.correlationId;
@@ -259,6 +272,19 @@ async function mergeBackupConfiguration(input: z.infer<typeof backupDestinationI
   }
   const clientSecret = input.config.clientSecret || (previous?.provider === "sharepoint" ? previous.clientSecret : "");
   return validateBackupDestination({ ...input.config, clientSecret });
+}
+
+async function mergeSharePointCredentials(input: z.infer<typeof sharePointCredentialsInput>): Promise<SharePointDiscoveryCredentials> {
+  const current = input.destinationId ? await getBackupDestination(input.destinationId) : null;
+  if (input.destinationId && !current) throw new Error("Backup destination not found.");
+  let previous: BackupDestinationConfig | null = null;
+  if (current?.provider === "sharepoint") {
+    try { previous = decryptConfig<BackupDestinationConfig>(current.encryptedConfig); }
+    catch { throw new Error("The existing encrypted backup configuration cannot be read. Enter the SharePoint client secret and save a replacement destination."); }
+  }
+  const clientSecret = input.clientSecret || (previous?.provider === "sharepoint" ? previous.clientSecret : "");
+  if (!clientSecret) throw new Error("Enter the SharePoint application client secret before discovering a new site.");
+  return { tenantId: input.tenantId, clientId: input.clientId, clientSecret };
 }
 
 export const appRouter = router({
@@ -615,8 +641,30 @@ export const appRouter = router({
       try {
         const config = decryptConfig<BackupDestinationConfig>(destination.encryptedConfig);
         if (config.provider === "s3") return { id: destination.id, label: destination.label, isActive: destination.isActive, config: { provider: config.provider, endpoint: config.endpoint, region: config.region, bucket: config.bucket, prefix: config.prefix } };
-        return { id: destination.id, label: destination.label, isActive: destination.isActive, config: { provider: config.provider, tenantId: config.tenantId, clientId: config.clientId, siteId: config.siteId, driveId: config.driveId, folderPath: config.folderPath } };
+        return { id: destination.id, label: destination.label, isActive: destination.isActive, config: { provider: config.provider, tenantId: config.tenantId, clientId: config.clientId, siteUrl: config.siteUrl ?? "", siteId: config.siteId, driveId: config.driveId, folderPath: config.folderPath } };
       } catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The encrypted backup configuration cannot be read. Save a replacement destination configuration." }); }
+    }),
+    discoverSharePoint: adminProcedure.input(sharePointDiscoveryInput).mutation(async ({ ctx, input }) => {
+      try {
+        const credentials = await mergeSharePointCredentials(input);
+        const result = await discoverSharePointSite({ ...credentials, siteUrl: input.siteUrl });
+        await audit(ctx, { eventType: "backup.sharepoint.site_discovered", resourceType: "backup_destination", resourceId: input.destinationId ? String(input.destinationId) : "new", outcome: "success", metadata: { libraryCount: result.drives.length } });
+        return result;
+      } catch (error) {
+        await audit(ctx, { eventType: "backup.sharepoint.site_discovery.failed", resourceType: "backup_destination", resourceId: input.destinationId ? String(input.destinationId) : "new", outcome: "failure" });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: error instanceof Error ? error.message : "The SharePoint site could not be discovered." });
+      }
+    }),
+    browseSharePointFolders: adminProcedure.input(sharePointFolderBrowseInput).mutation(async ({ ctx, input }) => {
+      try {
+        const credentials = await mergeSharePointCredentials(input);
+        const result = await listSharePointFolders({ ...credentials, siteId: input.siteId, driveId: input.driveId, folderPath: input.folderPath });
+        await audit(ctx, { eventType: "backup.sharepoint.folder_browsed", resourceType: "backup_destination", resourceId: input.destinationId ? String(input.destinationId) : "new", outcome: "success", metadata: { pathDepth: result.folderPath ? result.folderPath.split("/").length : 0, resultCount: result.folders.length } });
+        return result;
+      } catch (error) {
+        await audit(ctx, { eventType: "backup.sharepoint.folder_browse.failed", resourceType: "backup_destination", resourceId: input.destinationId ? String(input.destinationId) : "new", outcome: "failure" });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: error instanceof Error ? error.message : "The SharePoint folder list could not be loaded." });
+      }
     }),
     saveDestination: adminProcedure.input(backupDestinationInput).mutation(async ({ ctx, input }) => {
       if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Configure the server security key before backup destination credentials can be encrypted." });
