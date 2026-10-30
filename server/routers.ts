@@ -60,7 +60,7 @@ import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
 import { requireCompanyArchiveAdministrator, requireCompanyProvisioner, requireCompanyRole } from "./security/access";
-import { completeInitialSetup, createManagedUser, getInitialSetupStatus, listManagedUsers, logout as logoutStandalone, resetManagedMfa, resetManagedPassword, revokeManagedSessions, saveEntraConfiguration, setManagedUserStatus } from "./auth/service";
+import { completeInitialSetup, createManagedUser, getClarityConfiguration, getInitialSetupStatus, listManagedUsers, logout as logoutStandalone, resetManagedMfa, resetManagedPassword, revokeManagedSessions, saveClarityConfiguration, saveEntraConfiguration, setManagedUserStatus } from "./auth/service";
 import { createLocalSchedule, removeLocalSchedule, updateLocalSchedule } from "./scheduler/local";
 
 const companyIdInput = z.object({ companyId: z.number().int().positive() });
@@ -288,6 +288,12 @@ async function mergeSharePointCredentials(input: z.infer<typeof sharePointCreden
 }
 
 export const appRouter = router({
+  analytics: router({
+    clarityConfig: publicProcedure.query(async () => {
+      const config = await getClarityConfiguration();
+      return { projectId: config.enabled ? config.projectId : null };
+    }),
+  }),
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(async ({ ctx }) => {
@@ -609,6 +615,18 @@ export const appRouter = router({
 
   setup: router({
     status: adminProcedure.query(async () => ({ ...(await getInitialSetupStatus()), encryptionReady: isEncryptionConfigured() })),
+    clarityConfig: adminProcedure.query(async () => getClarityConfiguration()),
+    saveClarity: adminProcedure.input(z.object({ enabled: z.boolean(), projectId: z.string().trim().max(80).optional() })).mutation(async ({ ctx, input }) => {
+      if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The server security key must be configured before analytics settings can be encrypted." });
+      try {
+        await saveClarityConfiguration(input, ctx.user.id);
+        await audit(ctx, { eventType: "analytics.clarity.configuration.saved", resourceType: "application_setting", resourceId: "microsoft_clarity", outcome: "success", metadata: { enabled: input.enabled } });
+        return { saved: true };
+      } catch (error) {
+        await audit(ctx, { eventType: "analytics.clarity.configuration.save.failed", resourceType: "application_setting", resourceId: "microsoft_clarity", outcome: "failure", metadata: { enabled: input.enabled } });
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Unable to save Microsoft Clarity configuration." });
+      }
+    }),
     saveWelfarePrideSso: adminProcedure.input(z.object({
       tenantId: z.string().trim().min(1).max(160),
       clientId: z.string().trim().min(1).max(160),

@@ -14,9 +14,35 @@ import NotFound from "@/pages/NotFound";
 import Security from "@/pages/Security";
 import Setup from "@/pages/Setup";
 import Backups from "@/pages/Backups";
+import { trpc } from "@/lib/trpc";
+import Clarity from "@microsoft/clarity";
+import { useEffect } from "react";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+
+let initializedClarityProjectId: string | null = null;
+
+function ClarityTracker() {
+  const config = trpc.analytics.clarityConfig.useQuery(undefined, { retry: false, staleTime: 5 * 60_000 });
+
+  useEffect(() => {
+    const projectId = config.data?.projectId;
+    if (!projectId) {
+      if (initializedClarityProjectId) {
+        Clarity.consent(false);
+        initializedClarityProjectId = null;
+      }
+      return;
+    }
+    if (initializedClarityProjectId === projectId) return;
+    if (initializedClarityProjectId) Clarity.consent(false);
+    Clarity.init(projectId);
+    initializedClarityProjectId = projectId;
+  }, [config.data?.projectId]);
+
+  return null;
+}
 
 function Router() {
   return (
@@ -46,6 +72,7 @@ export default function App() {
     <ErrorBoundary>
       <ThemeProvider defaultTheme="light">
         <TooltipProvider>
+          <ClarityTracker />
           <WorkspaceProvider>
             <Router />
           </WorkspaceProvider>

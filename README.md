@@ -17,6 +17,7 @@ A secure, multi-tenant branded invoicing workspace for Welfare Pride and affilia
 - Reversible company portal archival: company administrators can hide a tenant while preserving all records, credentials, audit history, and numbering; archived companies can be restored by a retained administrator, with recurring schedules safely paused.
 - Structured audit data, correlation identifiers, validated HMAC-SHA256 webhook receipts, replay window enforcement, and conservative API rate limiting.
 - A first-administrator setup centre for company branding, Welfare Pride SSO, Graph/SMTP mail, client-facing email templates, and backup configuration after local password/MFA completion. The host-managed root encryption key is checked but never entered through the browser.
+- Optional Microsoft Clarity analytics using the official browser package, an encrypted platform-administrator configuration, audit-logged enable/disable changes, strict project-ID validation, and an explicit privacy/consent notice. See [Clarity configuration guidance](docs/CLARITY.md).
 - Platform-administrator local credential-free JSON exports plus encrypted cloud backups to Amazon/Wasabi/Backblaze S3-compatible storage or Microsoft SharePoint document libraries, with recorded test/upload outcomes and secret exclusions.
 
 ## Local development

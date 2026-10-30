@@ -10,6 +10,10 @@ The bootstrap `admin@welfarepride.local` account starts with a generated one-tim
 
 The browser labels this path **Welfare Pride Single Sign On (SSO)**. Its Entra tenant ID, client ID, and client secret are either supplied as Hostinger environment values or encrypted in the administrator-only Security & access configuration panel. The first administrator setup checklist prompts for SSO, branding, and Graph/SMTP delivery before it is dismissed. Entra uses Authorization Code with PKCE, one-time hashed state, nonce validation, a fixed HTTPS callback, discovery/JWKS signature validation, and exact tenant, issuer, and audience checks. Users must be provisioned by a platform administrator before SSO sign-in; a token email never grants access. First sign-in links a stable tenant/object ID, and later mismatch fails closed. The customer Entra tenant remains authoritative for Entra MFA policy.
 
+## Microsoft Clarity analytics
+
+Microsoft Clarity is disabled by default. A platform administrator may configure an enabled project ID in **Security & access**; the ID is validated, encrypted in application settings, and every configuration change is audit-logged. The public browser configuration endpoint returns only the enabled project ID required to initialize the official Clarity package and no administrative, billing, session, invoice, customer, or credential data. Enabling Clarity is an external telemetry decision: the administrator must apply the organization’s privacy notice, consent process, accessibility requirements, and regional compliance requirements before enabling it. See [CLARITY.md](CLARITY.md) for operational guidance.
+
 ## User lifecycle and tenancy
 
 Global platform administrators may create local or Entra accounts, disable/enable accounts, create one-time local passwords, reset MFA/recovery data, revoke sessions, and manage company memberships. Every privileged action has an immutable audit record. Company roles remain server-enforced for every company, contact, invoice, schedule, branding, provider configuration, email log, and asset request. Global administration and company membership are deliberately separate.

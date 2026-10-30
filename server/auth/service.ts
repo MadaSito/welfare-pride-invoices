@@ -17,6 +17,7 @@ const PENDING_MINUTES = 15;
 const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const ENTRA_CONFIGURATION_KEY = "welfare_pride_sso";
 const INITIAL_SETUP_KEY = "initial_setup_complete";
+const CLARITY_CONFIGURATION_KEY = "microsoft_clarity";
 
 export type SessionStage = "full" | "password_change" | "mfa_setup" | "mfa_verify";
 export type AuthMethod = "local" | "entra";
@@ -67,6 +68,7 @@ export function verifyTotp(secret: string, code: string) { return [-30_000, 0, 3
 async function dbRequired() { const db = await getDb(); if (!db) throw new Error("Database is unavailable"); return db; }
 
 type EntraConfiguration = { tenantId: string; clientId: string; clientSecret: string };
+export type ClarityConfiguration = { enabled: boolean; projectId: string };
 async function readEncryptedSetting<T extends Record<string, unknown>>(key: string): Promise<T | null> {
   const db = await dbRequired();
   const setting = (await db.select().from(applicationSettings).where(eq(applicationSettings.key, key)).limit(1))[0];
@@ -83,12 +85,30 @@ async function loadEntraConfiguration(): Promise<EntraConfiguration> {
   const stored = await readEncryptedSetting<EntraConfiguration>(ENTRA_CONFIGURATION_KEY);
   return stored ?? { tenantId: ENV.entraTenantId, clientId: ENV.entraClientId, clientSecret: ENV.entraClientSecret };
 }
+export function normalizeClarityProjectId(input: string) {
+  const projectId = input.trim();
+  if (!/^[A-Za-z0-9_-]{4,80}$/.test(projectId)) throw new Error("Use a valid Microsoft Clarity project ID containing 4–80 letters, numbers, hyphens, or underscores.");
+  return projectId;
+}
+export async function getClarityConfiguration(): Promise<ClarityConfiguration> {
+  const stored = await readEncryptedSetting<ClarityConfiguration>(CLARITY_CONFIGURATION_KEY);
+  if (!stored) return { enabled: false, projectId: "" };
+  try { return { enabled: Boolean(stored.enabled), projectId: stored.projectId ? normalizeClarityProjectId(stored.projectId) : "" }; }
+  catch { return { enabled: false, projectId: "" }; }
+}
+export async function saveClarityConfiguration(input: { enabled: boolean; projectId?: string }, updatedByUserId: number) {
+  const existing = await getClarityConfiguration();
+  const projectId = input.projectId?.trim() || existing.projectId;
+  if (input.enabled && !projectId) throw new Error("A Microsoft Clarity project ID is required when analytics are enabled.");
+  await writeEncryptedSetting(CLARITY_CONFIGURATION_KEY, { enabled: input.enabled, projectId: projectId ? normalizeClarityProjectId(projectId) : "" }, updatedByUserId);
+}
 export async function getInitialSetupStatus() {
   const db = await dbRequired();
   const setup = await readEncryptedSetting<{ complete: boolean }>(INITIAL_SETUP_KEY);
   const sso = await loadEntraConfiguration();
+  const clarity = await getClarityConfiguration();
   const backups = await db.select({ id: backupDestinations.id }).from(backupDestinations).limit(1);
-  return { complete: Boolean(setup?.complete), ssoConfigured: Boolean(sso.tenantId && sso.clientId && sso.clientSecret), ssoTenantId: sso.tenantId || null, ssoClientId: sso.clientId || null, backupConfigured: backups.length > 0 };
+  return { complete: Boolean(setup?.complete), ssoConfigured: Boolean(sso.tenantId && sso.clientId && sso.clientSecret), ssoTenantId: sso.tenantId || null, ssoClientId: sso.clientId || null, backupConfigured: backups.length > 0, clarityConfigured: Boolean(clarity.enabled && clarity.projectId) };
 }
 export async function saveEntraConfiguration(input: { tenantId: string; clientId: string; clientSecret?: string }, updatedByUserId: number) {
   const existing = await readEncryptedSetting<EntraConfiguration>(ENTRA_CONFIGURATION_KEY);
