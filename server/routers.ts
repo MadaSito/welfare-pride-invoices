@@ -4,7 +4,9 @@ import { z } from "zod";
 import {
   assignCompanyMembership,
   archiveCompany,
+  completeBackupRun,
   completeEmailLog,
+  createBackupRun,
   createAuditLog,
   createCompany,
   createContact,
@@ -17,13 +19,17 @@ import {
   ensureDefaultTenantForUser,
   getCompaniesForUser,
   getCompanyById,
+  getBackupDestination,
   getDashboardMetrics,
   getEmailProviderConfig,
+  getEmailTemplate,
   getInvoiceBundle,
   getPendingRecurringReview,
   getRecurringInvoiceSchedule,
   listCompanyMembers,
   listArchivedCompaniesForUser,
+  listBackupDestinations,
+  listBackupRuns,
   listContacts,
   listEmailLogs,
   listInvoices,
@@ -33,6 +39,9 @@ import {
   setCompanyInvoiceSequence,
   setRecurringInvoiceScheduleActive,
   saveEmailProviderConfig,
+  saveEmailTemplate,
+  saveBackupDestination,
+  setBackupDestinationVerification,
   setCompanyLogoKey,
   setRecurringInvoiceScheduleNumbering,
   setInvoiceStatus,
@@ -44,7 +53,9 @@ import {
 } from "./db";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { testProviderConnection, type ProviderConfig } from "./services/mailer";
-import { deliverFinalizedInvoice, InvoiceDeliveryError } from "./services/invoiceDelivery";
+import { deliverFinalizedInvoice, InvoiceDeliveryError, resendDeliveredInvoice } from "./services/invoiceDelivery";
+import { validateEmailTemplate } from "./services/emailTemplates";
+import { buildBackupArchive, testBackupDestination, uploadBackupArchive, validateBackupDestination, type BackupDestinationConfig } from "./services/backups";
 import { validateLogoUpload } from "./services/images";
 import { storagePut } from "./storage";
 import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
@@ -125,7 +136,7 @@ const graphConfigInput = z.object({
   provider: z.literal("microsoft_graph"),
   tenantId: z.string().trim().min(1).max(160),
   clientId: z.string().trim().min(1).max(160),
-  clientSecret: z.string().min(1).max(4096),
+  clientSecret: z.string().max(4096).optional().default(""),
   senderEmail: z.string().trim().email().max(320),
   displayName: z.string().trim().min(1).max(160),
 });
@@ -135,11 +146,31 @@ const smtpConfigInput = z.object({
   port: z.number().int().min(1).max(65535),
   secure: z.boolean(),
   username: z.string().trim().min(1).max(320),
-  password: z.string().min(1).max(4096),
+  password: z.string().max(4096).optional().default(""),
   fromEmail: z.string().trim().email().max(320),
   displayName: z.string().trim().min(1).max(160),
 });
 const deliveryConfigInput = z.discriminatedUnion("provider", [graphConfigInput, smtpConfigInput]);
+const emailTemplateInput = z.object({ subjectTemplate: z.string().trim().min(1).max(300), htmlBodyTemplate: z.string().trim().min(1).max(20_000) });
+const s3BackupConfigInput = z.object({
+  provider: z.literal("s3"),
+  endpoint: z.string().trim().url().max(500),
+  region: z.string().trim().max(100).optional().default("us-east-1"),
+  bucket: z.string().trim().min(3).max(255),
+  accessKeyId: z.string().trim().max(512).optional().default(""),
+  secretAccessKey: z.string().max(4096).optional().default(""),
+  prefix: z.string().trim().max(300).optional().default("welfare-pride-invoices-backups"),
+});
+const sharePointBackupConfigInput = z.object({
+  provider: z.literal("sharepoint"),
+  tenantId: z.string().trim().max(160),
+  clientId: z.string().trim().max(160),
+  clientSecret: z.string().max(4096).optional().default(""),
+  siteId: z.string().trim().max(512),
+  driveId: z.string().trim().max(512),
+  folderPath: z.string().trim().max(500).optional().default("Welfare Pride Invoices Backups"),
+});
+const backupDestinationInput = z.object({ id: z.number().int().positive().optional(), label: z.string().trim().min(2).max(160), isActive: z.boolean().default(true), config: z.discriminatedUnion("provider", [s3BackupConfigInput, sharePointBackupConfigInput]) });
 
 function getCorrelationId(ctx: { res: { locals: Record<string, unknown> } }) {
   const value = ctx.res.locals.correlationId;
@@ -196,6 +227,38 @@ function nextRunDate(value?: string | null) {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+async function mergeDeliveryConfiguration(companyId: number, input: z.infer<typeof deliveryConfigInput>): Promise<ProviderConfig> {
+  const current = await getEmailProviderConfig(companyId);
+  let previous: ProviderConfig | null = null;
+  if (current?.provider === input.provider) {
+    try { previous = decryptConfig<ProviderConfig>(current.encryptedConfig); } catch { throw new Error("The existing encrypted mail configuration cannot be read. Enter all credentials and save a replacement configuration."); }
+  }
+  if (input.provider === "microsoft_graph") {
+    const clientSecret = input.clientSecret.trim() || (previous?.provider === "microsoft_graph" ? previous.clientSecret : "");
+    if (!clientSecret) throw new Error("Enter the Microsoft Graph client secret for a new provider configuration.");
+    return { provider: input.provider, tenantId: input.tenantId, clientId: input.clientId, clientSecret, senderEmail: input.senderEmail, displayName: input.displayName };
+  }
+  const password = input.password || (previous?.provider === "smtp" ? previous.password : "");
+  if (!password) throw new Error("Enter the SMTP password for a new provider configuration.");
+  return { provider: input.provider, host: input.host, port: input.port, secure: input.secure, username: input.username, password, fromEmail: input.fromEmail, displayName: input.displayName };
+}
+
+async function mergeBackupConfiguration(input: z.infer<typeof backupDestinationInput>): Promise<BackupDestinationConfig> {
+  const current = input.id ? await getBackupDestination(input.id) : null;
+  if (input.id && !current) throw new Error("Backup destination not found.");
+  let previous: BackupDestinationConfig | null = null;
+  if (current?.provider === input.config.provider) {
+    try { previous = decryptConfig<BackupDestinationConfig>(current.encryptedConfig); } catch { throw new Error("The existing encrypted backup configuration cannot be read. Enter all destination credentials and save a replacement."); }
+  }
+  if (input.config.provider === "s3") {
+    const accessKeyId = input.config.accessKeyId || (previous?.provider === "s3" ? previous.accessKeyId : "");
+    const secretAccessKey = input.config.secretAccessKey || (previous?.provider === "s3" ? previous.secretAccessKey : "");
+    return validateBackupDestination({ ...input.config, accessKeyId, secretAccessKey });
+  }
+  const clientSecret = input.config.clientSecret || (previous?.provider === "sharepoint" ? previous.clientSecret : "");
+  return validateBackupDestination({ ...input.config, clientSecret });
 }
 
 export const appRouter = router({
@@ -543,18 +606,107 @@ export const appRouter = router({
     }),
   }),
 
+  backups: router({
+    destinations: adminProcedure.query(async () => listBackupDestinations()),
+    runs: adminProcedure.query(async () => listBackupRuns()),
+    destinationDetails: adminProcedure.input(z.object({ destinationId: z.number().int().positive() })).query(async ({ input }) => {
+      const destination = await getBackupDestination(input.destinationId);
+      if (!destination) throw new TRPCError({ code: "NOT_FOUND", message: "Backup destination not found." });
+      try {
+        const config = decryptConfig<BackupDestinationConfig>(destination.encryptedConfig);
+        if (config.provider === "s3") return { id: destination.id, label: destination.label, isActive: destination.isActive, config: { provider: config.provider, endpoint: config.endpoint, region: config.region, bucket: config.bucket, prefix: config.prefix } };
+        return { id: destination.id, label: destination.label, isActive: destination.isActive, config: { provider: config.provider, tenantId: config.tenantId, clientId: config.clientId, siteId: config.siteId, driveId: config.driveId, folderPath: config.folderPath } };
+      } catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The encrypted backup configuration cannot be read. Save a replacement destination configuration." }); }
+    }),
+    saveDestination: adminProcedure.input(backupDestinationInput).mutation(async ({ ctx, input }) => {
+      if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Configure the server security key before backup destination credentials can be encrypted." });
+      try {
+        const config = await mergeBackupConfiguration(input);
+        const saved = await saveBackupDestination({ id: input.id, label: input.label, provider: config.provider, encryptedConfig: encryptConfig(config), isActive: input.isActive, actorUserId: ctx.user.id });
+        const credentialsRetained = input.config.provider === "s3" ? !input.config.accessKeyId && !input.config.secretAccessKey : !input.config.clientSecret;
+        await audit(ctx, { eventType: "backup.destination.saved", resourceType: "backup_destination", resourceId: String(saved?.id), outcome: "success", metadata: { provider: config.provider, credentialsRetained } });
+        return saved ? { id: saved.id, label: saved.label, provider: saved.provider, isActive: saved.isActive, lastVerifiedAt: saved.lastVerifiedAt } : null;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Unable to save backup destination." });
+      }
+    }),
+    testDestination: adminProcedure.input(z.object({ destinationId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      const destination = await getBackupDestination(input.destinationId);
+      if (!destination) throw new TRPCError({ code: "NOT_FOUND", message: "Backup destination not found." });
+      const runId = await createBackupRun({ destinationId: destination.id, initiatedByUserId: ctx.user.id, operation: "destination_test" });
+      try {
+        const config = decryptConfig<BackupDestinationConfig>(destination.encryptedConfig);
+        const summary = await testBackupDestination(config);
+        await setBackupDestinationVerification(destination.id, summary);
+        await completeBackupRun(runId, { status: "succeeded", summary });
+        await audit(ctx, { eventType: "backup.destination.tested", resourceType: "backup_destination", resourceId: String(destination.id), outcome: "success", metadata: { provider: destination.provider } });
+        return { ok: true, summary };
+      } catch (error) {
+        const summary = "Backup destination test failed. Verify the encrypted credentials, permissions, and destination identifiers.";
+        await completeBackupRun(runId, { status: "failed", summary });
+        await audit(ctx, { eventType: "backup.destination.test.failed", resourceType: "backup_destination", resourceId: String(destination.id), outcome: "failure", metadata: { provider: destination.provider } });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: summary });
+      }
+    }),
+    runCloudBackup: adminProcedure.input(z.object({ destinationId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      const destination = await getBackupDestination(input.destinationId);
+      if (!destination || !destination.isActive) throw new TRPCError({ code: "NOT_FOUND", message: "An active backup destination was not found." });
+      let runId: number | null = null;
+      try {
+        const config = decryptConfig<BackupDestinationConfig>(destination.encryptedConfig);
+        const archive = await buildBackupArchive();
+        runId = await createBackupRun({ destinationId: destination.id, initiatedByUserId: ctx.user.id, operation: "cloud_backup", filename: archive.filename });
+        const archiveLocation = await uploadBackupArchive(config, archive);
+        await completeBackupRun(runId, { status: "succeeded", archiveLocation, checksumSha256: archive.checksumSha256, sizeBytes: archive.bytes, summary: "Encrypted backup archive uploaded successfully." });
+        await audit(ctx, { eventType: "backup.cloud.created", resourceType: "backup_run", resourceId: String(runId), outcome: "success", metadata: { destinationId: destination.id, provider: destination.provider, checksumSha256: archive.checksumSha256 } });
+        return { id: runId, filename: archive.filename, archiveLocation, checksumSha256: archive.checksumSha256, bytes: archive.bytes };
+      } catch (error) {
+        if (runId !== null) await completeBackupRun(runId, { status: "failed", summary: "Cloud backup failed. Verify destination credentials, permissions, and network access before retrying." });
+        await audit(ctx, { eventType: "backup.cloud.failed", resourceType: "backup_destination", resourceId: String(input.destinationId), outcome: "failure" });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: "The encrypted cloud backup could not be completed. Review backup run history and destination configuration." });
+      }
+    }),
+  }),
+
   delivery: router({
     configuration: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
       const config = await getEmailProviderConfig(input.companyId);
-      return { configured: Boolean(config?.isActive), provider: config?.provider ?? null, displayName: config?.displayName ?? null, encryptionReady: isEncryptionConfigured() };
+      let savedFields: Record<string, unknown> | null = null;
+      if (config) {
+        try {
+          const provider = decryptConfig<ProviderConfig>(config.encryptedConfig);
+          savedFields = provider.provider === "microsoft_graph" ? { tenantId: provider.tenantId, clientId: provider.clientId, senderEmail: provider.senderEmail, displayName: provider.displayName } : { host: provider.host, port: provider.port, secure: provider.secure, username: provider.username, fromEmail: provider.fromEmail, displayName: provider.displayName };
+        } catch { /* surface only the safe configured flag; the administrator may overwrite the configuration */ }
+      }
+      return { configured: Boolean(config?.isActive), provider: config?.provider ?? null, displayName: config?.displayName ?? null, encryptionReady: isEncryptionConfigured(), savedFields };
     }),
     saveConfiguration: protectedProcedure.input(companyIdInput.extend({ config: deliveryConfigInput })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
       if (!isEncryptionConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "APP_CONFIG_ENCRYPTION_KEY must be set before provider credentials can be stored." });
-      const saved = await saveEmailProviderConfig(input.companyId, ctx.user.id, { provider: input.config.provider, displayName: input.config.displayName, encryptedConfig: encryptConfig(input.config) });
-      await audit(ctx, { companyId: input.companyId, eventType: "delivery.configuration.saved", resourceType: "email_provider", resourceId: String(saved?.id), outcome: "success", metadata: { provider: input.config.provider } });
-      return { configured: Boolean(saved), provider: saved?.provider, displayName: saved?.displayName };
+      try {
+        const merged = await mergeDeliveryConfiguration(input.companyId, input.config);
+        const saved = await saveEmailProviderConfig(input.companyId, ctx.user.id, { provider: merged.provider, displayName: merged.displayName, encryptedConfig: encryptConfig(merged) });
+        await audit(ctx, { companyId: input.companyId, eventType: "delivery.configuration.saved", resourceType: "email_provider", resourceId: String(saved?.id), outcome: "success", metadata: { provider: merged.provider, credentialsRetained: input.config.provider === "microsoft_graph" ? !input.config.clientSecret : !input.config.password } });
+        return { configured: Boolean(saved), provider: saved?.provider, displayName: saved?.displayName };
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Unable to save mail configuration." });
+      }
+    }),
+    template: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      return (await getEmailTemplate(input.companyId)) ?? { id: null, subjectTemplate: "Invoice {{invoiceNumber}} from {{companyName}}", htmlBodyTemplate: "<p>Hello {{clientName}},</p><p>Please find invoice <strong>{{invoiceNumber}}</strong> attached. The amount due is <strong>{{invoiceTotal}}</strong>.</p><p>Due date: {{dueDate}}</p><p>Thank you,<br/>{{companyName}}</p>", isDefault: true };
+    }),
+    saveTemplate: protectedProcedure.input(companyIdInput.extend(emailTemplateInput.shape)).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const template = validateEmailTemplate(input);
+        const saved = await saveEmailTemplate(input.companyId, ctx.user.id, template);
+        await audit(ctx, { companyId: input.companyId, eventType: "delivery.template.saved", resourceType: "email_template", resourceId: String(saved?.id), outcome: "success" });
+        return saved;
+      } catch (error) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Unable to save email template." });
+      }
     }),
     sendTest: protectedProcedure.input(companyIdInput.extend({ recipient: z.string().trim().email() })).mutation(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
@@ -562,7 +714,7 @@ export const appRouter = router({
       if (!config) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Save a provider configuration before sending a test email." });
       let provider: ProviderConfig;
       try { provider = decryptConfig<ProviderConfig>(config.encryptedConfig); } catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The encrypted provider configuration cannot be read. Save it again after confirming the encryption key." }); }
-      const logId = await createEmailLog({ companyId: input.companyId, provider: config.provider, recipient: input.recipient, subject: `Welfare Pride delivery test — ${config.displayName}`, correlationId: getCorrelationId(ctx) });
+      const logId = await createEmailLog({ companyId: input.companyId, provider: config.provider, recipient: input.recipient, subject: `Welfare Pride delivery test — ${config.displayName}`, attemptType: "test", correlationId: getCorrelationId(ctx) });
       try {
         const result = await testProviderConnection(provider, input.recipient);
         await completeEmailLog(logId, "sent", `Test accepted by ${result.provider}; provider reference ${result.messageId}.`);
@@ -577,6 +729,17 @@ export const appRouter = router({
     logs: protectedProcedure.input(companyIdInput).query(async ({ ctx, input }) => {
       await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
       return listEmailLogs(input.companyId);
+    }),
+    resendInvoice: protectedProcedure.input(companyIdInput.extend({ invoiceId: z.number().int().positive(), reason: z.string().trim().min(5).max(500) })).mutation(async ({ ctx, input }) => {
+      await requireCompanyRole(ctx.user, input.companyId, "platform_admin");
+      try {
+        const delivery = await resendDeliveredInvoice({ companyId: input.companyId, invoiceId: input.invoiceId, correlationId: getCorrelationId(ctx) });
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.email.resent", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "success", metadata: { provider: delivery.provider, emailLogId: delivery.emailLogId, reason: input.reason } });
+        return delivery;
+      } catch (error) {
+        await audit(ctx, { companyId: input.companyId, eventType: "invoice.email.resend.failed", resourceType: "invoice", resourceId: String(input.invoiceId), outcome: "failure", metadata: { reason: input.reason, emailLogId: error instanceof InvoiceDeliveryError ? error.emailLogId : undefined } });
+        throw new TRPCError({ code: "BAD_GATEWAY", message: error instanceof InvoiceDeliveryError ? error.message : "The invoice could not be resent." });
+      }
     }),
   }),
 });

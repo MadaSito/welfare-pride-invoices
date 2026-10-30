@@ -36,3 +36,13 @@ export function decryptConfig<T extends Record<string, unknown>>(stored: string)
   const plaintext = Buffer.concat([decipher.update(Buffer.from(encryptedPart, "base64url")), decipher.final()]);
   return JSON.parse(plaintext.toString("utf8")) as T;
 }
+
+/** Encrypt a binary backup archive without exposing the root key to application code or browsers. */
+export function encryptBackupArchive(payload: Buffer) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", getKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Versioned compact envelope: magic (WPBK1), IV (12), GCM tag (16), ciphertext.
+  return Buffer.concat([Buffer.from("WPBK1", "ascii"), iv, tag, encrypted]);
+}

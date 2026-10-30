@@ -3,17 +3,21 @@ import { drizzle } from "drizzle-orm/mysql2";
 import { nanoid } from "nanoid";
 import {
   auditLogs,
+  backupDestinations,
+  backupRuns,
   companies,
   companyMembers,
   contacts,
   emailLogs,
   emailProviderConfigs,
+  emailTemplates,
   invoiceLineItems,
   invoices,
   recurringInvoiceLineItems,
   recurringInvoiceRuns,
   recurringInvoiceSchedules,
   type CompanyMemberRole,
+  type BackupProvider,
   type EmailProvider,
   type InsertUser,
   type InvoiceStatus,
@@ -838,6 +842,22 @@ export async function getEmailProviderConfig(companyId: number) {
   return (await db.select().from(emailProviderConfigs).where(eq(emailProviderConfigs.companyId, companyId)).limit(1))[0];
 }
 
+export const DEFAULT_INVOICE_EMAIL_SUBJECT = "Invoice {{invoiceNumber}} from {{companyName}}";
+export const DEFAULT_INVOICE_EMAIL_HTML = "<p>Hello {{clientName}},</p><p>Please find invoice <strong>{{invoiceNumber}}</strong> attached. The amount due is <strong>{{invoiceTotal}}</strong>.</p><p>Due date: {{dueDate}}</p><p>Thank you,<br/>{{companyName}}</p>";
+
+export async function getEmailTemplate(companyId: number) {
+  const db = await requireDb();
+  return (await db.select().from(emailTemplates).where(eq(emailTemplates.companyId, companyId)).limit(1))[0] ?? null;
+}
+
+export async function saveEmailTemplate(companyId: number, userId: number, input: { subjectTemplate: string; htmlBodyTemplate: string }) {
+  const db = await requireDb();
+  await db.insert(emailTemplates).values({ companyId, updatedByUserId: userId, ...input }).onDuplicateKeyUpdate({
+    set: { subjectTemplate: input.subjectTemplate, htmlBodyTemplate: input.htmlBodyTemplate, updatedByUserId: userId },
+  });
+  return getEmailTemplate(companyId);
+}
+
 export async function saveEmailProviderConfig(companyId: number, userId: number, input: { provider: EmailProvider; displayName: string; encryptedConfig: string }) {
   const db = await requireDb();
   await db.insert(emailProviderConfigs).values({
@@ -866,9 +886,10 @@ export async function createEmailLog(input: {
   subject: string;
   correlationId: string;
   attemptKey?: string | null;
+  attemptType?: "initial" | "resend" | "test";
 }) {
   const db = await requireDb();
-  const insert = await db.insert(emailLogs).values({ ...input, invoiceId: input.invoiceId ?? null, bcc: input.bcc ?? null, attemptKey: input.attemptKey ?? null, status: "queued" });
+  const insert = await db.insert(emailLogs).values({ ...input, invoiceId: input.invoiceId ?? null, bcc: input.bcc ?? null, attemptKey: input.attemptKey ?? null, attemptType: input.attemptType ?? "initial", status: "queued" });
   return Number(insert[0].insertId);
 }
 
@@ -909,6 +930,19 @@ export async function startInvoiceDeliveryLog(input: {
   }
 }
 
+/** A human-confirmed resend always receives a new immutable log attempt and never changes the invoice number. */
+export async function startInvoiceResendLog(input: {
+  companyId: number;
+  invoiceId: number;
+  provider: EmailProvider;
+  recipient: string;
+  bcc?: string | null;
+  subject: string;
+  correlationId: string;
+}) {
+  return createEmailLog({ ...input, attemptType: "resend", attemptKey: `invoice-${input.invoiceId}-resend-${nanoid(16)}` });
+}
+
 export async function completeEmailLog(logId: number, status: "sent" | "failed" | "uncertain", responseSummary: string) {
   const db = await requireDb();
   await db.update(emailLogs).set({ status, responseSummary: responseSummary.slice(0, 4000), ...(status === "sent" ? { sentAt: new Date() } : {}) }).where(eq(emailLogs.id, logId));
@@ -936,6 +970,60 @@ export async function reconcileUncertainInvoiceDelivery(companyId: number, invoi
 export async function listEmailLogs(companyId: number) {
   const db = await requireDb();
   return db.select().from(emailLogs).where(eq(emailLogs.companyId, companyId)).orderBy(desc(emailLogs.createdAt)).limit(100);
+}
+
+export async function listBackupDestinations() {
+  const db = await requireDb();
+  return db.select({ id: backupDestinations.id, label: backupDestinations.label, provider: backupDestinations.provider, isActive: backupDestinations.isActive, lastVerifiedAt: backupDestinations.lastVerifiedAt, lastVerificationSummary: backupDestinations.lastVerificationSummary, createdAt: backupDestinations.createdAt, updatedAt: backupDestinations.updatedAt }).from(backupDestinations).orderBy(desc(backupDestinations.updatedAt));
+}
+
+/** Server-only full destination record. Never expose the encrypted payload through a browser query. */
+export async function getBackupDestination(id: number) {
+  const db = await requireDb();
+  return (await db.select().from(backupDestinations).where(eq(backupDestinations.id, id)).limit(1))[0] ?? null;
+}
+
+export async function saveBackupDestination(input: { id?: number; label: string; provider: BackupProvider; encryptedConfig: string; isActive: boolean; actorUserId: number }) {
+  const db = await requireDb();
+  if (input.id) {
+    const existing = await getBackupDestination(input.id);
+    if (!existing) throw new Error("Backup destination not found.");
+    await db.update(backupDestinations).set({ label: input.label, provider: input.provider, encryptedConfig: input.encryptedConfig, isActive: input.isActive, updatedByUserId: input.actorUserId }).where(eq(backupDestinations.id, input.id));
+    return getBackupDestination(input.id);
+  }
+  const inserted = await db.insert(backupDestinations).values({ label: input.label, provider: input.provider, encryptedConfig: input.encryptedConfig, isActive: input.isActive, createdByUserId: input.actorUserId, updatedByUserId: input.actorUserId });
+  return getBackupDestination(Number(inserted[0].insertId));
+}
+
+export async function setBackupDestinationVerification(id: number, summary: string) {
+  const db = await requireDb();
+  await db.update(backupDestinations).set({ lastVerifiedAt: new Date(), lastVerificationSummary: summary.slice(0, 500) }).where(eq(backupDestinations.id, id));
+}
+
+export async function createBackupRun(input: { destinationId?: number | null; initiatedByUserId: number; operation: "local_export" | "destination_test" | "cloud_backup"; filename?: string | null }) {
+  const db = await requireDb();
+  const inserted = await db.insert(backupRuns).values({ destinationId: input.destinationId ?? null, initiatedByUserId: input.initiatedByUserId, operation: input.operation, filename: input.filename ?? null, status: "queued" });
+  return Number(inserted[0].insertId);
+}
+
+export async function completeBackupRun(id: number, input: { status: "succeeded" | "failed"; archiveLocation?: string | null; checksumSha256?: string | null; sizeBytes?: number | null; summary: string }) {
+  const db = await requireDb();
+  await db.update(backupRuns).set({ status: input.status, archiveLocation: input.archiveLocation ?? null, checksumSha256: input.checksumSha256 ?? null, sizeBytes: input.sizeBytes ?? null, summary: input.summary.slice(0, 4000), completedAt: new Date() }).where(eq(backupRuns.id, id));
+}
+
+export async function listBackupRuns() {
+  const db = await requireDb();
+  return db.select({ id: backupRuns.id, destinationId: backupRuns.destinationId, operation: backupRuns.operation, status: backupRuns.status, filename: backupRuns.filename, archiveLocation: backupRuns.archiveLocation, checksumSha256: backupRuns.checksumSha256, sizeBytes: backupRuns.sizeBytes, summary: backupRuns.summary, createdAt: backupRuns.createdAt, completedAt: backupRuns.completedAt, initiatedByUserId: backupRuns.initiatedByUserId, destinationLabel: backupDestinations.label, destinationProvider: backupDestinations.provider }).from(backupRuns).leftJoin(backupDestinations, eq(backupRuns.destinationId, backupDestinations.id)).orderBy(desc(backupRuns.createdAt)).limit(100);
+}
+
+/** Portable business-data export. Credentials, password/MFA material, recovery codes, and sessions are intentionally omitted. */
+export async function createApplicationDataExport() {
+  const db = await requireDb();
+  const [companyRows, membershipRows, contactRows, invoiceRows, invoiceItemRows, recurringRows, recurringItemRows, recurringRunRows, mailRows, auditRows, templateRows, userRows] = await Promise.all([
+    db.select().from(companies), db.select().from(companyMembers), db.select().from(contacts), db.select().from(invoices), db.select().from(invoiceLineItems), db.select().from(recurringInvoiceSchedules), db.select().from(recurringInvoiceLineItems), db.select().from(recurringInvoiceRuns), db.select().from(emailLogs), db.select().from(auditLogs), db.select().from(emailTemplates),
+    db.select({ id: users.id, name: users.name, email: users.email, authProvider: users.authProvider, accountStatus: users.accountStatus, role: users.role, createdAt: users.createdAt, lastSignedIn: users.lastSignedIn }).from(users),
+  ]);
+  return { format: "welfare-pride-invoices-export", version: 1, exportedAt: new Date().toISOString(), notes: "Provider, SSO, and backup credentials; password hashes; MFA seeds; recovery codes; and sessions are intentionally excluded.", data: { companies: companyRows, companyMembers: membershipRows, contacts: contactRows, invoices: invoiceRows, invoiceLineItems: invoiceItemRows, recurringInvoiceSchedules: recurringRows, recurringInvoiceLineItems: recurringItemRows, recurringInvoiceRuns: recurringRunRows, emailTemplates: templateRows, emailLogs: mailRows, auditLogs: auditRows, users: userRows } };
 }
 
 export async function createAuditLog(input: {

@@ -2,7 +2,7 @@
 
 ## Identity and sessions
 
-Authentication is application-owned. Local passwords use scrypt with a random salt. Browser sessions are random opaque values kept only as SHA-256 hashes in MySQL, are short-lived for incomplete sign-in stages, and are revocable through session versioning. An `HttpOnly`, `Secure` (production), `SameSite=Lax` session cookie is paired with a readable CSRF cookie and required `x-wp-csrf-token` header on authenticated tRPC mutations. No platform OAuth, platform JWT, bearer-token fallback, browser session-storage token, or public platform configuration remains.
+Authentication is application-owned. Local passwords use scrypt with a random salt. Browser sessions are random opaque values kept only as SHA-256 hashes in MySQL, are short-lived for incomplete sign-in stages, and are revocable through session versioning. An `HttpOnly`, `Secure` (production), `SameSite=Lax` session cookie is paired with a readable CSRF cookie and required `x-wp-csrf-token` header on authenticated tRPC mutations and staged password/MFA/logout HTTP mutations. No platform OAuth, platform JWT, bearer-token fallback, browser session-storage token, or public platform configuration remains.
 
 The bootstrap `admin@welfarepride.local` account starts with a generated one-time password, forced password change, and forced TOTP enrollment. Administrator password resets repeat that sequence. Local MFA uses encrypted RFC 6238 TOTP seeds and hashed, one-time recovery codes. Resetting MFA or revoking sessions invalidates active sessions.
 
@@ -17,6 +17,14 @@ Global platform administrators may create local or Entra accounts, disable/enabl
 ## Financial, mail, and tenant safeguards
 
 Server-side Zod validation recomputes invoice totals and protects lifecycle transitions. Review-first recurring documents enter `awaiting_approval`; only a tenant creator/admin can approve before finalization or delivery. Draft-only discard, protected sequence allocation, separate one-off/recurring series, durable outbox uncertainty, Graph/SMTP encryption, HMAC webhook verification, PDF `private, no-store`, tenant archive barriers, and immutable audit safeguards remain active.
+
+Company administrators may safely reconfigure Graph or SMTP without re-submitting an unchanged secret; encrypted credential payloads are decrypted and merged only on the server and are never returned to the browser. Invoice email templates accept a fixed variable allowlist, reject subject line breaks, sanitize HTML, HTML-escape resolved values, and are rendered only at dispatch time. An administrator-confirmed resend requires a reason, retains the financial invoice number, creates a distinct delivery log attempt, and cannot automatically bypass an uncertain provider outcome.
+
+## First-run configuration and backup protection
+
+The first-run setup centre verifies only whether the host-managed root encryption key is valid. It never accepts, displays, stores, or exports `APP_CONFIG_ENCRYPTION_KEY`; that value must remain in Hostinger secret management and in a separately protected recovery record. The setup centre guides branding, SSO, provider settings, email templates, and encrypted backup destinations after MFA is complete.
+
+Backup configuration credentials are encrypted at rest and only platform administrators may test destinations, download a local export, or initiate an encrypted cloud archive. S3-compatible endpoints must use public HTTPS hosts, while SharePoint uploads use Microsoft Graph app credentials and a selected site/drive/path. Local exports and encrypted archive payloads intentionally omit password hashes, MFA seeds, recovery codes, sessions, database URLs, scheduler/webhook secrets, and Graph/SMTP/Entra/backup credentials. Backup download responses are `private, no-store`; backup objects use independent destinations and are never available through the company-logo asset route.
 
 ## S3 storage and Hostinger cron
 

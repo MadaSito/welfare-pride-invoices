@@ -3,7 +3,7 @@ import { parse as parseCookies } from "cookie";
 import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Request, Response } from "express";
-import { applicationSettings, authLoginTransactions, companies, companyMembers, userRecoveryCodes, userSessions, users, type User } from "../../drizzle/schema";
+import { applicationSettings, authLoginTransactions, backupDestinations, companies, companyMembers, userRecoveryCodes, userSessions, users, type User } from "../../drizzle/schema";
 import { getDb } from "../db";
 import { ENV } from "../_core/env";
 import { getSessionCookieOptions } from "../_core/cookies";
@@ -84,9 +84,11 @@ async function loadEntraConfiguration(): Promise<EntraConfiguration> {
   return stored ?? { tenantId: ENV.entraTenantId, clientId: ENV.entraClientId, clientSecret: ENV.entraClientSecret };
 }
 export async function getInitialSetupStatus() {
+  const db = await dbRequired();
   const setup = await readEncryptedSetting<{ complete: boolean }>(INITIAL_SETUP_KEY);
   const sso = await loadEntraConfiguration();
-  return { complete: Boolean(setup?.complete), ssoConfigured: Boolean(sso.tenantId && sso.clientId && sso.clientSecret), ssoTenantId: sso.tenantId || null, ssoClientId: sso.clientId || null };
+  const backups = await db.select({ id: backupDestinations.id }).from(backupDestinations).limit(1);
+  return { complete: Boolean(setup?.complete), ssoConfigured: Boolean(sso.tenantId && sso.clientId && sso.clientSecret), ssoTenantId: sso.tenantId || null, ssoClientId: sso.clientId || null, backupConfigured: backups.length > 0 };
 }
 export async function saveEntraConfiguration(input: { tenantId: string; clientId: string; clientSecret?: string }, updatedByUserId: number) {
   const existing = await readEncryptedSetting<EntraConfiguration>(ENTRA_CONFIGURATION_KEY);

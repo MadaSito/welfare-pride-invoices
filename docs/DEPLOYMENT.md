@@ -15,7 +15,7 @@ pnpm build
 NODE_ENV=production node dist/index.js
 ```
 
-Run `pnpm bootstrap:admin` before retiring the legacy login. It creates `admin@welfarepride.local` only when absent, prints a strong one-time password once, requires a password change, and then requires TOTP MFA enrollment.
+Run `pnpm bootstrap:admin` before retiring the legacy login. It creates `admin@welfarepride.local` only when absent, prints a strong one-time password once, requires a password change, and then requires TOTP MFA enrollment. After that first full login, open **Set up Welfare Pride Invoices** to configure branding, optional Welfare Pride SSO, Graph/SMTP delivery, email copy, and backups. The root encryption key remains a Hostinger server setting—not an in-browser setup field—because it is the root of trust for all stored credentials.
 
 ## Required environment variables
 
@@ -65,4 +65,17 @@ Schedule it frequently enough for the configured UTC cadence (for example, every
 
 ## Mail, TLS, and production checks
 
-Configure Graph or SMTP within **Email delivery** after deployment. Continue to restrict Graph `Mail.Send` and mailbox scope according to Microsoft 365 policy. Terminate TLS at Hostinger or a hardened reverse proxy; set `APP_ORIGIN` to the exact HTTPS origin; do not cache authenticated pages, PDFs, APIs, or webhooks. Verify health, bootstrap login, forced password change, MFA enrollment, a second local user, an Entra provisioned user, tenant role assignment, logo upload, PDF download, mail test, protected scheduler rejection without its secret, and webhook HMAC rejection before go-live.
+Configure or reconfigure Graph or SMTP within **Email delivery** after deployment. Existing Graph client secrets and SMTP passwords may be left blank when changing non-secret details; the server retains the saved encrypted credential. The same workspace manages the client-facing invoice subject and sanitized HTML body. Allowed invoice placeholders are resolved and HTML-escaped only at send time. Continue to restrict Graph `Mail.Send` and mailbox scope according to Microsoft 365 policy.
+
+**Email logs** records initial sends, connection tests, explicit administrator resends, and uncertain outcomes. A resend requires a stated administrator reason, creates a new delivery attempt, keeps the original invoice number/PDF, and never happens automatically after an uncertain provider response.
+
+## Backups and exports
+
+Platform administrators use **Backups & exports** to download a credential-free local JSON export or create an encrypted `.wpbk` cloud archive. The export/archive excludes database and application secrets, password hashes, TOTP seeds, recovery codes, live sessions, and Graph/SMTP/Entra/backup credentials.
+
+Cloud destinations are configured in the application and encrypted with `APP_CONFIG_ENCRYPTION_KEY`:
+
+- **Amazon S3, Wasabi, or Backblaze B2 S3-compatible storage:** public HTTPS endpoint, region, bucket, prefix, access key ID, and secret access key.
+- **Microsoft SharePoint:** Entra tenant/client credentials, SharePoint site ID, document-library drive ID, and folder path. Grant the application only the required site/library permissions.
+
+Test each destination before relying on it. Store independent recovery material: GitHub source, MySQL-provider backups, a current encrypted export, and the exact root encryption key. Rotating or losing that key prevents decryption of existing in-app credentials and cloud archives. Terminate TLS at Hostinger or a hardened reverse proxy; set `APP_ORIGIN` to the exact HTTPS origin; do not cache authenticated pages, PDFs, APIs, exports, or webhooks. Verify health, bootstrap login, forced password change, MFA enrollment, a second local user, an Entra provisioned user, tenant role assignment, logo upload, PDF download, mail test, local export, backup destination test, protected scheduler rejection without its secret, and webhook HMAC rejection before go-live.

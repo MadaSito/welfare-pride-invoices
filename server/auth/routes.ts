@@ -1,10 +1,16 @@
 import type { Express, Request, Response } from "express";
-import { beginMfaEnrollment, changeOwnPassword, completeEntraLogin, confirmMfaEnrollment, localLogin, logout, startEntraLogin, verifyMfa } from "./service";
+import { authenticateRequest, beginMfaEnrollment, changeOwnPassword, completeEntraLogin, confirmMfaEnrollment, localLogin, logout, requireCsrf, startEntraLogin, verifyMfa } from "./service";
 
 function text(input: unknown) { return typeof input === "string" ? input : ""; }
 function safeError(res: Response, error: unknown, fallback: string, status = 400) {
   const message = error instanceof Error ? error.message : fallback;
   res.status(status).json({ error: message.length <= 240 ? message : fallback });
+}
+
+async function requireAuthenticatedCsrf(req: Request) {
+  const session = await authenticateRequest(req);
+  if (!session) throw new Error("Authentication is required.");
+  await requireCsrf(req, session);
 }
 
 export function registerStandaloneAuthRoutes(app: Express) {
@@ -13,22 +19,22 @@ export function registerStandaloneAuthRoutes(app: Express) {
     catch (error) { safeError(res, error, "Unable to sign in.", 401); }
   });
   app.post("/api/auth/change-password", async (req, res) => {
-    try { res.json(await changeOwnPassword(text(req.body?.password), req, res)); }
+    try { await requireAuthenticatedCsrf(req); res.json(await changeOwnPassword(text(req.body?.password), req, res)); }
     catch (error) { safeError(res, error, "Unable to change password."); }
   });
-  app.get("/api/auth/mfa/setup", async (req, res) => {
-    try { res.json(await beginMfaEnrollment(req)); }
+  app.post("/api/auth/mfa/setup", async (req, res) => {
+    try { await requireAuthenticatedCsrf(req); res.json(await beginMfaEnrollment(req)); }
     catch (error) { safeError(res, error, "Unable to prepare MFA enrollment.", 401); }
   });
   app.post("/api/auth/mfa/confirm", async (req, res) => {
-    try { res.json(await confirmMfaEnrollment(text(req.body?.code), req, res)); }
+    try { await requireAuthenticatedCsrf(req); res.json(await confirmMfaEnrollment(text(req.body?.code), req, res)); }
     catch (error) { safeError(res, error, "Unable to confirm MFA.", 401); }
   });
   app.post("/api/auth/mfa/verify", async (req, res) => {
-    try { res.json(await verifyMfa(text(req.body?.code), req, res)); }
+    try { await requireAuthenticatedCsrf(req); res.json(await verifyMfa(text(req.body?.code), req, res)); }
     catch (error) { safeError(res, error, "Unable to verify MFA.", 401); }
   });
-  app.post("/api/auth/logout", async (req, res) => { await logout(req, res); res.json({ success: true }); });
+  app.post("/api/auth/logout", async (req, res) => { try { await requireAuthenticatedCsrf(req); await logout(req, res); res.json({ success: true }); } catch (error) { safeError(res, error, "Unable to sign out.", 403); } });
   app.get("/api/auth/entra/login", async (req, res) => { try { await startEntraLogin(req, res); } catch (error) { safeError(res, error, "Welfare Pride Single Sign On is unavailable.", 503); } });
   app.get("/api/auth/entra/callback", async (req, res) => {
     const code = typeof req.query.code === "string" ? req.query.code : ""; const state = typeof req.query.state === "string" ? req.query.state : "";

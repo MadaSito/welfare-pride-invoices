@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { calculateInvoiceTotals, formatInvoiceNumber, formatRecurringInvoiceNumber, hasRecurringSeriesPrefixConflict, isProvisionalInvoiceNumber, recurringOccurrenceKey } from "./db";
-import { decryptConfig, encryptConfig, isEncryptionConfigured } from "./security/crypto";
+import { decryptConfig, encryptBackupArchive, encryptConfig, isEncryptionConfigured } from "./security/crypto";
 
 const originalKey = process.env.APP_CONFIG_ENCRYPTION_KEY;
 
@@ -51,5 +51,12 @@ describe("provider configuration encryption", () => {
     const encrypted = encryptConfig({ provider: "smtp", password: "private" });
     expect(encrypted).not.toContain("private");
     expect(decryptConfig<{ provider: string; password: string }>(encrypted)).toEqual({ provider: "smtp", password: "private" });
+  });
+
+  it("encrypts backup archive bytes without retaining readable payload text", () => {
+    process.env.APP_CONFIG_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
+    const archive = encryptBackupArchive(Buffer.from("client invoice records", "utf8"));
+    expect(archive.subarray(0, 5).toString("ascii")).toBe("WPBK1");
+    expect(archive.toString("utf8")).not.toContain("client invoice records");
   });
 });

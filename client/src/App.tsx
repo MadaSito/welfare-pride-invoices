@@ -12,6 +12,8 @@ import Invoices from "@/pages/Invoices";
 import RecurringInvoices from "@/pages/RecurringInvoices";
 import NotFound from "@/pages/NotFound";
 import Security from "@/pages/Security";
+import Setup from "@/pages/Setup";
+import Backups from "@/pages/Backups";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
@@ -30,6 +32,8 @@ function Router() {
         <Route path="/delivery" component={Delivery} />
         <Route path="/email-logs" component={EmailLogs} />
         <Route path="/security" component={Security} />
+        <Route path="/setup" component={Setup} />
+        <Route path="/backups" component={Backups} />
         <Route path="/404" component={NotFound} />
         <Route component={NotFound} />
       </Switch>

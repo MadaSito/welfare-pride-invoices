@@ -16,7 +16,11 @@ const requireUser = t.middleware(async ({ ctx, type, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user, session: ctx.session } });
 });
 export const protectedProcedure = t.procedure.use(requireUser);
-export const adminProcedure = t.procedure.use(t.middleware(async ({ ctx, next }) => {
+export const adminProcedure = t.procedure.use(t.middleware(async ({ ctx, type, next }) => {
   if (!ctx.user || !ctx.session || ctx.session.stage !== "full" || ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+  if (type === "mutation") {
+    try { await requireCsrf(ctx.req, ctx.session); }
+    catch { throw new TRPCError({ code: "FORBIDDEN", message: "This request could not be verified. Refresh and try again." }); }
+  }
   return next({ ctx: { ...ctx, user: ctx.user, session: ctx.session } });
 }));

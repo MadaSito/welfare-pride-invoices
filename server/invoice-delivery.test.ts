@@ -4,26 +4,35 @@ const mocks = vi.hoisted(() => ({
   allocateInvoiceNumberForSending: vi.fn(),
   completeEmailLog: vi.fn(),
   getEmailProviderConfig: vi.fn(),
+  getEmailTemplate: vi.fn(),
   getInvoiceBundle: vi.fn(),
   setInvoiceStatus: vi.fn(),
   startInvoiceDeliveryLog: vi.fn(),
+  startInvoiceResendLog: vi.fn(),
   decryptConfig: vi.fn(),
   sendProviderEmail: vi.fn(),
   renderInvoicePdf: vi.fn(),
 }));
 
 vi.mock("./db", () => ({
+  DEFAULT_INVOICE_EMAIL_HTML: "<p>Invoice</p>",
+  DEFAULT_INVOICE_EMAIL_SUBJECT: "Invoice {{invoiceNumber}}",
   allocateInvoiceNumberForSending: mocks.allocateInvoiceNumberForSending,
   completeEmailLog: mocks.completeEmailLog,
   getEmailProviderConfig: mocks.getEmailProviderConfig,
+  getEmailTemplate: mocks.getEmailTemplate,
   getInvoiceBundle: mocks.getInvoiceBundle,
   setInvoiceStatus: mocks.setInvoiceStatus,
   startInvoiceDeliveryLog: mocks.startInvoiceDeliveryLog,
+  startInvoiceResendLog: mocks.startInvoiceResendLog,
 }));
 vi.mock("./security/crypto", () => ({ decryptConfig: mocks.decryptConfig }));
 vi.mock("./services/mailer", () => ({
   escapeHtml: (value: string) => value,
   sendProviderEmail: mocks.sendProviderEmail,
+}));
+vi.mock("./services/emailTemplates", () => ({
+  renderInvoiceEmailTemplate: () => ({ subject: "Invoice WP-2026-1001", html: "<p>Invoice</p>" }),
 }));
 vi.mock("./services/pdf", () => ({
   invoicePdfFilename: (value: string) => `${value}.pdf`,
@@ -33,7 +42,7 @@ vi.mock("./services/pdf", () => ({
 import { deliverFinalizedInvoice, InvoiceDeliveryError } from "./services/invoiceDelivery";
 
 const bundle = {
-  invoice: { id: 41, status: "finalized", invoiceNumber: "WP-2026-1001", currency: "USD", totalCents: 12_500 },
+  invoice: { id: 41, status: "finalized", invoiceNumber: "WP-2026-1001", currency: "USD", totalCents: 12_500, issueDate: new Date("2026-10-30T00:00:00Z"), dueDate: new Date("2026-11-30T00:00:00Z") },
   company: { name: "Welfare Pride", defaultBcc: null },
   contact: { email: "client@example.org", contactName: "Alex", companyName: "Client Org" },
   lineItems: [],
@@ -43,6 +52,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.getInvoiceBundle.mockResolvedValue(bundle);
   mocks.getEmailProviderConfig.mockResolvedValue({ isActive: true, provider: "smtp", encryptedConfig: "encrypted" });
+  mocks.getEmailTemplate.mockResolvedValue(null);
   mocks.decryptConfig.mockReturnValue({ provider: "smtp", host: "smtp.example.org" });
   mocks.allocateInvoiceNumberForSending.mockResolvedValue(bundle);
   mocks.startInvoiceDeliveryLog.mockResolvedValue(9);

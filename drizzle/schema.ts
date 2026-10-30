@@ -298,6 +298,21 @@ export const emailProviderConfigs = mysqlTable(
   table => [uniqueIndex("email_provider_company_uq").on(table.companyId)],
 );
 
+/** Administrator-authored invoice delivery copy. Values are resolved only on the server. */
+export const emailTemplates = mysqlTable(
+  "email_templates",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    companyId: int("companyId").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    subjectTemplate: varchar("subjectTemplate", { length: 300 }).notNull(),
+    htmlBodyTemplate: text("htmlBodyTemplate").notNull(),
+    updatedByUserId: int("updatedByUserId").notNull().references(() => users.id),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  table => [uniqueIndex("email_templates_company_uq").on(table.companyId)],
+);
+
 export const emailLogs = mysqlTable(
   "email_logs",
   {
@@ -309,6 +324,7 @@ export const emailLogs = mysqlTable(
     recipient: varchar("recipient", { length: 320 }).notNull(),
     bcc: varchar("bcc", { length: 320 }),
     subject: varchar("subject", { length: 300 }).notNull(),
+    attemptType: mysqlEnum("attemptType", ["initial", "resend", "test"]).default("initial").notNull(),
     attemptKey: varchar("attemptKey", { length: 96 }),
     responseSummary: text("responseSummary"),
     correlationId: varchar("correlationId", { length: 96 }).notNull(),
@@ -319,6 +335,45 @@ export const emailLogs = mysqlTable(
     index("email_logs_company_created_idx").on(table.companyId, table.createdAt),
     uniqueIndex("email_logs_attempt_key_uq").on(table.attemptKey),
   ],
+);
+
+/** Multiple encrypted destinations can be retained so administrators can use S3-compatible or SharePoint storage. */
+export const backupDestinations = mysqlTable(
+  "backup_destinations",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    label: varchar("label", { length: 160 }).notNull(),
+    provider: mysqlEnum("provider", ["s3", "sharepoint"]).notNull(),
+    encryptedConfig: text("encryptedConfig").notNull(),
+    isActive: boolean("isActive").default(true).notNull(),
+    lastVerifiedAt: timestamp("lastVerifiedAt"),
+    lastVerificationSummary: varchar("lastVerificationSummary", { length: 500 }),
+    createdByUserId: int("createdByUserId").notNull().references(() => users.id),
+    updatedByUserId: int("updatedByUserId").notNull().references(() => users.id),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  table => [index("backup_destinations_active_idx").on(table.isActive)],
+);
+
+/** Immutable operational record for downloadable exports, destination tests, and cloud backup attempts. */
+export const backupRuns = mysqlTable(
+  "backup_runs",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    destinationId: int("destinationId").references(() => backupDestinations.id, { onDelete: "set null" }),
+    initiatedByUserId: int("initiatedByUserId").references(() => users.id, { onDelete: "set null" }),
+    operation: mysqlEnum("operation", ["local_export", "destination_test", "cloud_backup"]).notNull(),
+    status: mysqlEnum("status", ["queued", "succeeded", "failed"]).default("queued").notNull(),
+    filename: varchar("filename", { length: 320 }),
+    archiveLocation: varchar("archiveLocation", { length: 1000 }),
+    checksumSha256: varchar("checksumSha256", { length: 64 }),
+    sizeBytes: int("sizeBytes"),
+    summary: text("summary"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    completedAt: timestamp("completedAt"),
+  },
+  table => [index("backup_runs_created_idx").on(table.createdAt), index("backup_runs_destination_idx").on(table.destinationId)],
 );
 
 export const auditLogs = mysqlTable(
@@ -365,5 +420,6 @@ export type Company = typeof companies.$inferSelect;
 export type CompanyMemberRole = "platform_admin" | "company_creator" | "company_viewer";
 export type InvoiceStatus = "draft" | "awaiting_approval" | "finalized" | "sending" | "sent" | "paid" | "void";
 export type EmailProvider = "microsoft_graph" | "smtp";
+export type BackupProvider = "s3" | "sharepoint";
 export type RecurringInvoiceCadence = "daily" | "weekly" | "monthly" | "semiannual" | "yearly";
 export type RecurringInvoiceRunStatus = "running" | "created" | "sent" | "failed" | "uncertain";

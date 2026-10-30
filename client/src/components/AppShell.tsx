@@ -3,6 +3,7 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { cn } from "@/lib/utils";
 import { trpc } from "@/lib/trpc";
 import {
+  Archive,
   Bell,
   Building2,
   CalendarClock,
@@ -32,6 +33,7 @@ const administration = [
   { href: "/delivery", label: "Email delivery", icon: Landmark },
   { href: "/email-logs", label: "Email logs", icon: MailCheck },
   { href: "/security", label: "Security & access", icon: ShieldCheck },
+  { href: "/backups", label: "Backups & exports", icon: Archive },
 ];
 
 function BrandMark({ inverse = false }: { inverse?: boolean }) {
@@ -40,8 +42,8 @@ function BrandMark({ inverse = false }: { inverse?: boolean }) {
 
 function LoginScreen() {
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [step, setStep] = useState<"login" | "password_change" | "mfa_setup" | "mfa_verify" | "recovery">("login"); const [code, setCode] = useState(""); const [setup, setSetup] = useState<{ secret: string; otpauthUri: string } | null>(null); const [recovery, setRecovery] = useState<string[]>([]); const [message, setMessage] = useState(""); const [busy, setBusy] = useState(false);
-  const request = async (url: string, body?: Record<string, string>) => { const response = await fetch(url, { method: body ? "POST" : "GET", credentials: "include", headers: body ? { "content-type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || "Authentication failed."); return data; };
-  const enroll = async () => { const result = await request("/api/auth/mfa/setup"); setSetup(result); setStep("mfa_setup"); };
+  const request = async (url: string, body?: Record<string, string>) => { const csrf = document.cookie.split("; ").find(item => item.startsWith("wp_invoice_csrf="))?.split("=").slice(1).join("="); const response = await fetch(url, { method: body ? "POST" : "GET", credentials: "include", headers: body ? { "content-type": "application/json", ...(csrf ? { "x-wp-csrf-token": decodeURIComponent(csrf) } : {}) } : {}, body: body ? JSON.stringify(body) : undefined }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || "Authentication failed."); return data; };
+  const enroll = async () => { const result = await request("/api/auth/mfa/setup", {}); setSetup(result); setStep("mfa_setup"); };
   const signIn = async () => { setBusy(true); setMessage(""); try { const result = await request("/api/auth/login", { email, password }); if (result.next === "full") window.location.reload(); else if (result.next === "mfa_setup") await enroll(); else setStep(result.next); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to sign in."); } finally { setBusy(false); } };
   const changePassword = async () => { setBusy(true); setMessage(""); try { await request("/api/auth/change-password", { password }); setStep("mfa_setup"); await enroll(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to change password."); } finally { setBusy(false); } };
   const confirmMfa = async () => { setBusy(true); try { const result = await request("/api/auth/mfa/confirm", { code }); setRecovery(result.recoveryCodes ?? []); setStep("recovery"); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to confirm MFA."); } finally { setBusy(false); } };
@@ -80,12 +82,14 @@ function InitialSetupAssistant() {
     <ShieldCheck size={19} style={{ marginTop: 2, flex: "0 0 auto" }} />
     <div style={{ width: "100%" }}><strong>Initial administrator setup</strong><p style={{ margin: "5px 0 13px" }}>Finish the essential Welfare Pride configuration before inviting staff or issuing invoices. SSO and email delivery are optional, but are prompted here so they can be configured deliberately.</p>
       <div className="inline-actions" style={{ flexWrap: "wrap" }}>
+        <button className="button button-secondary" onClick={() => setLocation("/setup")}>Open setup workspace</button>
         <button className="button button-secondary" onClick={() => setLocation("/branding")}>Configure branding</button>
         <button className="button button-secondary" onClick={() => setLocation("/security")}>{setup.data.ssoConfigured ? "Review Welfare Pride SSO" : "Configure Welfare Pride SSO"}</button>
-        <button className="button button-secondary" onClick={() => setLocation("/delivery")}>Configure Graph or SMTP mail</button>
+        <button className="button button-secondary" onClick={() => setLocation("/delivery")}>Configure Graph, SMTP & templates</button>
+        <button className="button button-secondary" onClick={() => setLocation("/backups")}>{setup.data.backupConfigured ? "Review backups" : "Configure backups"}</button>
         <button className="button button-primary" disabled={complete.isPending || !setup.data.encryptionReady} onClick={() => complete.mutate()}>{complete.isPending ? "Completing…" : "Mark initial setup complete"}</button>
       </div>
-      {!setup.data.encryptionReady && <small style={{ display: "block", marginTop: 10 }}>The server security key must be configured before setup can be completed.</small>}
+      {!setup.data.encryptionReady && <small style={{ display: "block", marginTop: 10 }}>The server security key must be configured in Hostinger before setup can be completed.</small>}
     </div>
   </section>;
 }
