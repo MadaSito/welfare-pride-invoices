@@ -11,10 +11,13 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 "$ROOT_DIR/scripts/prepare-environment.sh"
-if grep -Eq 'example\.com|CHANGE_THIS|__GENERATE__' .env; then
-  echo "Edit .env before continuing: APP_ORIGIN and S3 storage values must use production values." >&2
-  exit 1
-fi
+for key in APP_ORIGIN S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+  value="$(grep -E "^${key}=" .env | tail -n1 | cut -d= -f2- || true)"
+  if [[ -z "$value" || "$value" == *"example.com"* || "$value" == *"CHANGE_THIS"* || "$value" == "__GENERATE__" ]]; then
+    echo "Edit .env before continuing: ${key} must use a production value." >&2
+    exit 1
+  fi
+done
 
 MYSQL_PASSWORD_VALUE="$(grep '^MYSQL_PASSWORD=' .env | cut -d= -f2-)"
 if [[ ! "$MYSQL_PASSWORD_VALUE" =~ ^[A-Za-z0-9_-]{16,}$ ]]; then

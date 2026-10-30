@@ -109,6 +109,8 @@ Keep Hostinger connected to the `main` branch. A push to `main` triggers the con
 
 ## Self-hosted alternatives
 
+For a fully automated Ubuntu/Debian VPS deployment, use the [one-command VPS installation guide](VPS_INSTALLATION.md). It installs the required runtime, asks for only the deployment-specific configuration, creates a non-root service, configures Nginx, runs migrations, and prints the bootstrap administrator credential only when it creates that account.
+
 For a VPS or bare-metal Linux host, use the deployment selector from a cloned repository:
 
 ```bash
