@@ -8,6 +8,7 @@ import {
   Building2,
   CalendarClock,
   ChevronDown,
+  Copy,
   FilePlus2,
   FileText,
   Landmark,
@@ -19,7 +20,8 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import QRCode from "qrcode";
+import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 
 const navigation = [
@@ -41,13 +43,22 @@ function BrandMark({ inverse = false }: { inverse?: boolean }) {
 }
 
 function LoginScreen() {
-  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [step, setStep] = useState<"login" | "password_change" | "mfa_setup" | "mfa_verify" | "recovery">("login"); const [code, setCode] = useState(""); const [setup, setSetup] = useState<{ secret: string; otpauthUri: string } | null>(null); const [recovery, setRecovery] = useState<string[]>([]); const [message, setMessage] = useState(""); const [busy, setBusy] = useState(false);
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [step, setStep] = useState<"login" | "password_change" | "mfa_setup" | "mfa_verify" | "recovery">("login"); const [code, setCode] = useState(""); const [setup, setSetup] = useState<{ secret: string; otpauthUri: string } | null>(null); const [qrCodeDataUrl, setQrCodeDataUrl] = useState(""); const [recovery, setRecovery] = useState<string[]>([]); const [message, setMessage] = useState(""); const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!setup?.otpauthUri) { setQrCodeDataUrl(""); return; }
+    QRCode.toDataURL(setup.otpauthUri, { errorCorrectionLevel: "M", margin: 1, width: 224, color: { dark: "#163a55", light: "#FFFFFFFF" } })
+      .then(url => { if (!cancelled) setQrCodeDataUrl(url); })
+      .catch(() => { if (!cancelled) setMessage("The QR code could not be prepared. Use the manual setup key below instead."); });
+    return () => { cancelled = true; };
+  }, [setup?.otpauthUri]);
   const request = async (url: string, body?: Record<string, string>) => { const csrf = document.cookie.split("; ").find(item => item.startsWith("wp_invoice_csrf="))?.split("=").slice(1).join("="); const response = await fetch(url, { method: body ? "POST" : "GET", credentials: "include", headers: body ? { "content-type": "application/json", ...(csrf ? { "x-wp-csrf-token": decodeURIComponent(csrf) } : {}) } : {}, body: body ? JSON.stringify(body) : undefined }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || "Authentication failed."); return data; };
   const enroll = async () => { const result = await request("/api/auth/mfa/setup", {}); setSetup(result); setStep("mfa_setup"); };
   const signIn = async () => { setBusy(true); setMessage(""); try { const result = await request("/api/auth/login", { email, password }); if (result.next === "full") window.location.reload(); else if (result.next === "mfa_setup") await enroll(); else setStep(result.next); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to sign in."); } finally { setBusy(false); } };
   const changePassword = async () => { setBusy(true); setMessage(""); try { await request("/api/auth/change-password", { password }); setStep("mfa_setup"); await enroll(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to change password."); } finally { setBusy(false); } };
   const confirmMfa = async () => { setBusy(true); try { const result = await request("/api/auth/mfa/confirm", { code }); setRecovery(result.recoveryCodes ?? []); setStep("recovery"); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to confirm MFA."); } finally { setBusy(false); } };
   const verifyMfa = async () => { setBusy(true); try { await request("/api/auth/mfa/verify", { code }); window.location.reload(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to verify MFA."); } finally { setBusy(false); } };
+  const copyManualKey = async () => { if (!setup?.secret) return; try { await navigator.clipboard.writeText(setup.secret); setMessage("Manual authenticator key copied. Paste it into your authenticator app if scanning is unavailable."); } catch { setMessage("Copy is unavailable in this browser. Select and copy the manual key shown below."); } };
   return (
     <main className="login-stage">
       <section className="login-panel">
@@ -57,7 +68,7 @@ function LoginScreen() {
         <p>Build branded PDF invoices, manage delivery securely, and retain a trustworthy audit trail for every send.</p>
         {step === "login" && <><label className="form-field"><span>Email</span><input className="field-input" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></label><label className="form-field"><span>Password</span><input className="field-input" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={signIn}>{busy ? "Signing in…" : "Sign in"}</button><a className="button button-secondary button-wide" href="/api/auth/entra/login">Sign in with Welfare Pride Single Sign On (SSO)</a></>}
         {step === "password_change" && <><h2>Set your permanent password</h2><p>Your temporary password must be changed before access is granted.</p><label className="form-field"><span>New password</span><input className="field-input" type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={changePassword}>Save password</button></>}
-        {step === "mfa_setup" && <><h2>Set up authenticator MFA</h2><p>Add this secret to Microsoft Authenticator, Google Authenticator, or another TOTP app, then enter the six-digit code.</p>{setup ? <><code className="auth-secret">{setup.secret}</code><label className="form-field"><span>Authenticator code</span><input className="field-input" inputMode="numeric" value={code} onChange={event => setCode(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={confirmMfa}>Verify and continue</button></> : <button className="button button-primary button-wide" disabled={busy} onClick={enroll}>{busy ? "Preparing MFA…" : "Prepare authenticator setup"}</button>}</>}
+        {step === "mfa_setup" && <><h2>Set up authenticator MFA</h2><p>Scan the QR code with Microsoft Authenticator, Google Authenticator, or another TOTP app. If scanning is unavailable, use the manual key.</p>{setup ? <><div className="mfa-enrollment"><div className="mfa-qr-wrap" aria-live="polite">{qrCodeDataUrl ? <img src={qrCodeDataUrl} alt="Scan to add Welfare Pride Invoices to your authenticator app" className="mfa-qr-code" /> : <span>Preparing secure QR code…</span>}<small>Scan this QR code</small></div><div className="mfa-manual-key"><strong>Manual setup key</strong><p>In your authenticator app, choose “Enter a setup key” if you cannot scan.</p><code className="auth-secret" aria-label="Manual authenticator key">{setup.secret}</code><button className="button button-secondary" type="button" onClick={copyManualKey}><Copy size={15} />Copy manual key</button></div></div><label className="form-field"><span>Authenticator code</span><input className="field-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={event => setCode(event.target.value.replace(/\D/g, ""))} /></label><button className="button button-primary button-wide" disabled={busy || code.length !== 6} onClick={confirmMfa}>Verify and continue</button></> : <button className="button button-primary button-wide" disabled={busy} onClick={enroll}>{busy ? "Preparing MFA…" : "Prepare authenticator setup"}</button>}</>}
         {step === "mfa_verify" && <><h2>Verify MFA</h2><p>Enter your six-digit authenticator code or an unused recovery code.</p><label className="form-field"><span>Verification code</span><input className="field-input" inputMode="numeric" value={code} onChange={event => setCode(event.target.value)} /></label><button className="button button-primary button-wide" disabled={busy} onClick={verifyMfa}>Verify and continue</button></>}
         {step === "recovery" && <><h2>Save recovery codes</h2><p>Store these one-time codes securely. They are shown only once.</p><code className="auth-secret">{recovery.join("\n")}</code><button className="button button-primary button-wide" onClick={() => window.location.reload()}>I saved my codes</button></>}
         {message && <p className="auth-error">{message}</p>}<p className="login-caption"><ShieldCheck size={15} /> Application-owned sessions and MFA protect every company workspace.</p>

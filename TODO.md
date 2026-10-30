@@ -61,6 +61,9 @@
   - Remove platform OAuth, SDK, public runtime configuration, preview session/token fallback, notification, object-storage proxy, and scheduler/Heartbeat dependencies from production code. Replace recurring execution with a Hostinger-compatible cron-triggerable authenticated dispatcher, durable external/S3-compatible logo storage configuration, and standalone deployment documentation. Preserve current tenant boundaries, invoice/series safeguards, Graph/SMTP delivery, database audit history, and the protected recurring-run idempotency ledger.
   - Status: standalone identity/schema migrations are applied; the bootstrap administrator exists with forced password change and MFA setup; TypeScript checks, automated tests, production build, health, bad-login, cron-secret rejection, schema verification, and first-login-stage verification passed.
 
+- [x] **Scannable authenticator enrollment**
+  - During local TOTP MFA enrollment, present a browser-generated QR code encoding the server-issued `otpauth://` URI so Microsoft Authenticator, Google Authenticator, and compatible applications can scan it. Keep the raw base32 secret as a readable, one-click-copy manual fallback; never log the secret or URI, and do not alter the server-side TOTP enrollment/confirmation checks.
+
 - [x] **Welfare Pride SSO and initial administrator setup**
   - Label the browser entry point as **Sign in with Welfare Pride Single Sign On (SSO)** while preserving the Microsoft Entra ID Authorization Code + PKCE implementation underneath.
   - Prompt every platform administrator after first full login with a setup checklist for Welfare Pride branding, Welfare Pride SSO, and Graph/SMTP delivery configuration. The checklist may be completed after the administrator deliberately reviews optional SSO and mail settings; it must clearly identify the server-security-key prerequisite.

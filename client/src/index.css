@@ -53,3 +53,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .document-list { display:grid; gap:10px; margin:0; padding-left:20px; color:var(--muted); line-height:1.55; }
 .subpanel > small { display:block; margin:4px 0 10px; color:var(--muted); }
 @media (max-width:760px) { .setup-grid { grid-template-columns:1fr; } .setup-step { min-height:auto; } }
+
+/* Authenticator enrollment: QR scan first, manual key always available. */
+.mfa-enrollment { display:grid; grid-template-columns:224px minmax(0,1fr); gap:18px; align-items:center; margin:3px 0 20px; padding:16px; border:1px solid #c9e0ef; border-radius:12px; background:#f8fcff; }
+.mfa-qr-wrap { display:grid; min-height:224px; place-items:center; gap:8px; padding:10px; border:1px solid #d8e7f1; border-radius:9px; background:#fff; color:var(--muted); font-size:12px; text-align:center; }
+.mfa-qr-code { display:block; width:204px; height:204px; image-rendering:pixelated; }
+.mfa-qr-wrap small { color:var(--wp-blue-dark); font-size:11px; font-weight:700; }
+.mfa-manual-key { display:grid; gap:8px; align-content:center; }
+.mfa-manual-key strong { color:var(--ink); font-size:14px; }
+.mfa-manual-key p { margin:0; color:var(--muted); font-size:12px; line-height:1.45; }
+.mfa-manual-key .auth-secret { display:block; max-width:100%; overflow-wrap:anywhere; margin:0; padding:10px 11px; border:1px solid #c9d9e4; border-radius:7px; background:#fff; color:var(--ink); font-size:12px; line-height:1.45; }
+.mfa-manual-key .button { justify-self:start; }
+@media (max-width:620px) { .mfa-enrollment { grid-template-columns:1fr; } .mfa-qr-wrap { width:224px; margin:0 auto; } }
