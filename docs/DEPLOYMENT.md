@@ -1,5 +1,7 @@
 # Welfare Pride Invoices — Standalone Hostinger Deployment
 
+For the exact Hostinger hPanel values, GitHub branch/build/entry settings, first-admin deployment sequence, and portable native/Docker installer paths, use [HOSTINGER_DEPLOYMENT.md](HOSTINGER_DEPLOYMENT.md).
+
 ## Runtime
 
 This is a standalone Node 22 Express/tRPC and React application. It has no platform OAuth, platform JWT, platform object-storage proxy, or platform scheduler dependency. Hostinger must provide a MySQL-compatible `DATABASE_URL`, an S3-compatible object store, HTTPS, and a Node process that receives `PORT`. The health check is `GET /api/health`.

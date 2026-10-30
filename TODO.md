@@ -6,7 +6,7 @@
   - Include a brand asset catalogue with the original logo, appropriately sized variants, dark/light usage assets where appropriate, and a printable letterhead/document asset.
 
 - [x] **Secure identity, tenancy, and roles**
-  - Preserve real Manus OAuth session validation and protect all app data behind authenticated server procedures.
+  - Protect all application data behind authenticated server procedures and standalone session validation.
   - Provide platform administrator, company invoice creator, and company invoice viewer roles, with membership stored per company and server-side tenant isolation for every company, contact, invoice, provider configuration, log, and asset request.
   - Bootstrap Welfare Pride as the default tenant without overwriting later administrative changes. Record security-sensitive mutations in structured audit logs with actor, tenant, correlation ID, and outcome.
 
@@ -49,7 +49,7 @@
 
 - [x] **Quality, delivery, and GitHub source transfer**
   - Maintain TypeScript diagnostics, run type checks/build/tests applicable to modified code, and fix actionable errors.
-  - Confirm the application has `/manus-routes.json`, an unauthenticated `/api/health`, durable object storage usage for uploaded logos/generated PDFs, and a production-capable Docker configuration.
+  - Confirm the application has an unauthenticated `/api/health`, durable object storage usage for uploaded logos/generated PDFs, and a production-capable Docker configuration.
   - Connect the finished project to a new private GitHub repository using the managed GitHub transfer confirmation flow, preserve project history, push the completed `main` branch, and confirm the resulting checkpoint/transfer status.
   - Status: application checks/build, health/route validation, PDF verification, responsive preview review, two additive migrations, and the canonical GitHub source checkpoint are complete.
 
@@ -76,3 +76,8 @@
   - Provide a company administrator audit timeline for all delivery attempts and explicit administrator-confirmed resend actions. Resends must create a new immutable delivery-log attempt, retain the invoice’s allocated number, preserve the PDF attachment, and never silently retry uncertain provider outcomes.
   - Provide platform-administrator local JSON export and encrypted cloud-backup capabilities. Support multiple encrypted destinations: Amazon S3, Wasabi S3, Backblaze B2 S3-compatible object storage, and Microsoft SharePoint document libraries through Microsoft Graph. Store destination credentials encrypted; record test, export, upload, success/failure, archive location, and actor in backup runs/audit data; exclude password hashes, MFA seeds, session tokens, recovery codes, and provider/SSO/backup secrets from exported data.
   - For Microsoft SharePoint, accept a normal HTTPS global-Microsoft-365 SharePoint site address and securely resolve the Graph site ID and accessible document libraries from the configured application credentials. Correctly preserve encoded browser-copied site names, follow bounded trusted Graph pagination, and provide a click-through, breadcrumbs-based folder picker that records the selected drive and path. Before browse, test, or upload, require that the drive belongs to the selected site and the configured path is an accessible folder; retain an advanced identifier view for troubleshooting without requiring administrators to manually locate or type Graph IDs. Audit site discovery and successful or failed folder enumeration without secrets or access tokens.
+
+- [x] **Portable Hostinger deployment package and self-hosted source hygiene**
+  - Remove residual managed-platform metadata, CDN project configuration, legacy authentication types, route-manifest artifacts, debug/back-up configuration, and user-facing branding from the deployable self-hosted application source. Retain only Welfare Pride branding and standalone Node.js/Express runtime dependencies.
+  - Provide a reviewed `.env.example`, current Hostinger Node.js Web App deployment instructions, and exact GitHub branch/build/entry-point guidance for this Express plus Vite application. Document which production secrets must be entered in Hostinger rather than committed, the safe first-install bootstrap process, post-deployment administrator setup, health validation, and recurring cron configuration.
+  - Provide executable, non-destructive deployment automation for native Node.js/VPS and Docker Compose installations, plus an installer selector that lets an operator choose native, Docker, or Docker-with-MySQL setup. The automation must run migrations, create the forced-change local bootstrap administrator only when absent, avoid storing generated secrets in source, and clearly identify the remaining human configuration required for database, domain/HTTPS, and object storage.

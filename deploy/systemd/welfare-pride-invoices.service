@@ -1,0 +1,21 @@
+# Installed by scripts/install-native.sh with the current application directory and pnpm executable.
+[Unit]
+Description=Welfare Pride Invoices
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIRECTORY__
+User=__RUN_USER__
+Group=__RUN_GROUP__
+EnvironmentFile=__APP_DIRECTORY__/.env
+Environment=NODE_ENV=production
+UMask=0077
+ExecStart=__PNPM_EXECUTABLE__ start
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

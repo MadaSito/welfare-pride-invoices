@@ -2,6 +2,9 @@
   "name": "wpinvoice",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
@@ -13,6 +16,7 @@
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "db:migrate": "drizzle-kit migrate",
     "bootstrap:admin": "tsx scripts/bootstrap-local-admin.ts",
+    "deploy:hostinger": "bash scripts/hostinger-build.sh",
     "dev:static": "vite --host 0.0.0.0 --port ${PORT:-3000} --strictPort",
     "build:static": "vite build"
   },

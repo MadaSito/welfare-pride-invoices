@@ -30,6 +30,10 @@ pnpm dev
 
 The health endpoint is `GET /api/health`.
 
+## Hostinger and self-hosted deployment
+
+Deploy the `main` branch from the repository root on Hostinger Node.js Web App Hosting with Node 22, pnpm, build command `pnpm deploy:hostinger`, and entry file `dist/index.js`. The complete production variables, first-admin bootstrap, MFA, recurring-cron, GitHub update, native VPS, and Docker instructions are in [docs/HOSTINGER_DEPLOYMENT.md](docs/HOSTINGER_DEPLOYMENT.md). The portable installer selector is `./scripts/install.sh` after cloning the repository to a Linux host.
+
 ## Before enabling live email
 
 Set `APP_CONFIG_ENCRYPTION_KEY` in Hostinger environment configuration. It must be a 32-byte base64 or hexadecimal value. After the first full local-admin login, use **Set up Welfare Pride Invoices** to configure branding, optional SSO, delivery/template settings, and backup destinations. Do not write Graph, SMTP, Entra, S3, SharePoint, database, or scheduler credentials into source or `.env` files. See [deployment guidance](docs/DEPLOYMENT.md) and the [security model](docs/SECURITY.md) for the complete standalone operating model.
