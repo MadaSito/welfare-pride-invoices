@@ -2,6 +2,7 @@ export const ENV = {
   get databaseUrl() { return process.env.DATABASE_URL ?? ""; },
   get isProduction() { return process.env.NODE_ENV === "production"; },
   get appOrigin() { return (process.env.APP_ORIGIN ?? "").replace(/\/$/, ""); },
+  get trustProxy() { return process.env.TRUST_PROXY === "true" || process.env.TRUST_PROXY === "1"; },
   get entraTenantId() { return process.env.ENTRA_TENANT_ID ?? ""; },
   get entraClientId() { return process.env.ENTRA_CLIENT_ID ?? ""; },
   get entraClientSecret() { return process.env.ENTRA_CLIENT_SECRET ?? ""; },

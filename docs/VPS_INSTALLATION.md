@@ -2,7 +2,7 @@
 
 This guide deploys Welfare Pride Invoices as a self-hosted service on an **Ubuntu or Debian VPS**. The interactive installer supports two production modes:
 
-- **Native** — Node.js 22, a non-root `welfarepride` system account, systemd, Nginx, and your existing MySQL-compatible database.
+- **Native** — Node.js 22, a non-root `welfarepride` system account, a locally provisioned MySQL-compatible server, systemd, and Nginx.
 - **Docker** — Docker Compose, persistent local MySQL, application containers, and Nginx.
 
 It installs missing system prerequisites, clones or safely fast-forwards the `main` branch, protects an `.env` file, generates missing application secrets locally, applies additive migrations, starts the service, and creates the initial local administrator only when that account does not already exist.
@@ -11,10 +11,10 @@ It installs missing system prerequisites, clones or safely fast-forwards the `ma
 
 Prepare these values:
 
-- A DNS hostname for the app, such as `invoices.example.com`, pointed at the VPS public IP.
+- A DNS hostname for the app, such as `invoices.example.com`, pointed at the VPS public IP and proxied through Cloudflare.
 - A private S3-compatible bucket plus endpoint, region, access key, and secret for company logos.
-- For **Native** mode, a MySQL `DATABASE_URL` with a user allowed to run migrations.
-- For **Docker** mode, no external MySQL is needed; Docker Compose creates an isolated persistent MySQL service.
+- No database credential is required for the default **Native** or **Docker** path: both provision a persistent local MySQL-compatible database and generate its application credentials locally.
+- Use `--database external` only when **Native** mode should use an existing remote MySQL-compatible database; the installer then prompts for its `DATABASE_URL`.
 
 The installer asks for these values interactively. It never prints entered database or object-storage credentials.
 
@@ -37,12 +37,12 @@ sudo ./scripts/install-vps-ubuntu.sh --mode docker
 
 The installer will:
 
-1. Install Nginx plus Node.js 22 (**Native**) or Docker Engine/Compose (**Docker**).
+1. Install Nginx and Node.js 22 plus local MySQL (**Native**) or Nginx, Node.js 22, Docker Engine/Compose, and its persistent MySQL container (**Docker**).
 2. Create the non-root `welfarepride` service account.
-3. Ask for the public HTTPS origin, logo-storage configuration, and initial local administrator email. Native mode also asks for `DATABASE_URL`.
-4. Generate an `APP_CONFIG_ENCRYPTION_KEY`, webhook secret, scheduler secret, and required Docker database passwords only when they are absent.
+3. Ask for the public HTTPS origin, logo-storage configuration, and initial local administrator email. It asks for `DATABASE_URL` only when Native mode uses `--database external`.
+4. Generate an `APP_CONFIG_ENCRYPTION_KEY`, webhook secret, scheduler secret, and required database passwords only when they are absent. Docker stores its MySQL root password in a local `.secrets/` file mounted only into the database container; it is not passed to the application or migration containers.
 5. Install dependencies, build the application, run migrations, and create the initial administrator when absent.
-6. Configure a non-root systemd service (**Native**) or start Docker Compose (**Docker**) and create an Nginx reverse-proxy site.
+6. Configure a non-root systemd service (**Native**) or start Docker Compose (**Docker**), create an Nginx reverse-proxy site, and configure trusted Cloudflare real-IP handling.
 
 The first time it creates the administrator, the terminal displays:
 
@@ -65,9 +65,13 @@ sudo ./install-vps-ubuntu.sh --mode native
 
 For a higher-assurance deployment, use the clone method above and inspect the script before running it.
 
-## Finish HTTPS after DNS is active
+## Cloudflare DNS proxy and HTTPS
 
-The script configures Nginx on port 80. After DNS has propagated, issue a TLS certificate. On Ubuntu, one common approach is:
+Create an **A** or **AAAA** DNS record in Cloudflare that points to the VPS. Initially keep it **DNS only** (gray cloud) while issuing the origin certificate, or otherwise ensure a valid origin certificate is already installed. After that, switch it to **Proxied** (orange cloud) and set **Cloudflare → SSL/TLS encryption mode** to **Full (strict)**; do not use Flexible mode. The installer trusts `CF-Connecting-IP` only from Cloudflare's published IP ranges so rate limits and audit records keep the visitor IP instead of the Cloudflare edge IP.
+
+Native mode binds Node.js to `127.0.0.1:3000`; Docker binds its host mapping only to `127.0.0.1:3000` while its internal container listener remains available to Compose. Public traffic therefore passes through Nginx. Do not change `BIND_HOST` or `HOST_BIND_ADDRESS` to a public interface unless a separate protected reverse proxy is in place.
+
+The script configures Nginx on port 80. After DNS has propagated, install a valid origin certificate. One common Ubuntu approach is Let's Encrypt:
 
 ```bash
 sudo apt-get install -y certbot python3-certbot-nginx
@@ -75,6 +79,14 @@ sudo certbot --nginx -d invoices.example.com
 ```
 
 Replace `invoices.example.com` with your actual hostname. Do not allow production sign-ins until the certificate is active and `APP_ORIGIN` exactly matches the HTTPS origin.
+
+To prevent direct public access to the origin after confirming you have reliable SSH access, use the optional Cloudflare origin-lock mode on an installer run:
+
+```bash
+sudo ./scripts/install-vps-ubuntu.sh --mode native --lock-cloudflare-origin
+```
+
+It creates an Nginx allow-list for current Cloudflare IP ranges and denies all other public origin traffic without changing firewall or SSH rules. The lock persists across ordinary installer updates and refreshes along with Cloudflare's published ranges. Enable it only after the origin certificate is active; temporarily disable the lock before using any direct origin validation, monitor, VPN, or load balancer that must reach ports 80/443.
 
 ## Verify and complete initial setup
 

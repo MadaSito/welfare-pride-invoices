@@ -6,8 +6,10 @@ COPY patches ./patches
 RUN CI=1 pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
+RUN groupadd --system app && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app && chown -R app:app /app
 ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+USER app
 CMD ["node", "dist/index.js"]

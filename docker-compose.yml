@@ -7,11 +7,13 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-wpinvoice}
       MYSQL_USER: ${MYSQL_USER:-wpinvoice}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+    secrets:
+      - mysql_root_password
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$(cat /run/secrets/mysql_root_password)\" --silent"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -41,12 +43,13 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      BIND_HOST: 0.0.0.0
       DATABASE_URL: mysql://${MYSQL_USER:-wpinvoice}:${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}@db:3306/${MYSQL_DATABASE:-wpinvoice}
     depends_on:
       migrate:
         condition: service_completed_successfully
     ports:
-      - "${HOST_PORT:-3000}:3000"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -55,3 +58,7 @@ services:
 
 volumes:
   mysql-data:
+
+secrets:
+  mysql_root_password:
+    file: ./.secrets/mysql_root_password

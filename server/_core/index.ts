@@ -13,9 +13,10 @@ import { storageGetSignedUrl } from "../storage";
 import { registerBackupRoutes } from "../routes/backupRoutes";
 import { authenticateRequest } from "../auth/service";
 import { getCompanyAccess } from "../db";
+import { ENV } from "./env";
 
 async function startServer() {
-  const app = express(); const server = createServer(app); app.disable("x-powered-by"); app.set("trust proxy", 1);
+  const app = express(); const server = createServer(app); app.disable("x-powered-by"); app.set("trust proxy", ENV.trustProxy ? 1 : false);
   app.use(requestSecurity); app.use("/api", apiRateLimit); registerWebhookRoutes(app);
   app.use(express.json({ limit: "2mb" })); app.use(express.urlencoded({ limit: "2mb", extended: true }));
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
@@ -24,6 +25,7 @@ async function startServer() {
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
   if (process.env.NODE_ENV === "development") await setupVite(app, server); else serveStatic(app);
   const port = Number(process.env.PORT || "3000"); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PORT");
-  server.on("error", error => { console.error("Server failed:", error.message); process.exit(1); }); server.listen(port, "0.0.0.0", () => console.log(`Server listening on port ${port}`));
+  const bindHost = process.env.BIND_HOST || "0.0.0.0"; if (!["0.0.0.0", "127.0.0.1", "::1"].includes(bindHost)) throw new Error("Invalid BIND_HOST");
+  server.on("error", error => { console.error("Server failed:", error.message); process.exit(1); }); server.listen(port, bindHost, () => console.log(`Server listening on ${bindHost}:${port}`));
 }
 startServer().catch(error => { console.error(error); process.exit(1); });

@@ -26,26 +26,24 @@ if [[ ! "$MYSQL_PASSWORD_VALUE" =~ ^[A-Za-z0-9_-]{16,}$ ]]; then
   exit 1
 fi
 
-docker compose up -d --build
+"$ROOT_DIR/scripts/prepare-docker-secrets.sh"
+
+docker compose up -d --build db
 for _ in $(seq 1 72); do
-  MIGRATE_CONTAINER="$(docker compose ps -q migrate || true)"
-  if [[ -n "$MIGRATE_CONTAINER" ]]; then
-    STATUS="$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$MIGRATE_CONTAINER")"
-    if [[ "$STATUS" == "exited:0" ]]; then break; fi
-    if [[ "$STATUS" == exited:* ]]; then
-      docker compose logs migrate >&2
-      echo "Database migration or bootstrap failed; the web application was not started." >&2
-      exit 1
-    fi
-  fi
+  DB_CONTAINER="$(docker compose ps -q db || true)"
+  if [[ -n "$DB_CONTAINER" ]] && [[ "$(docker inspect -f '{{.State.Health.Status}}' "$DB_CONTAINER" 2>/dev/null || true)" == "healthy" ]]; then break; fi
   sleep 5
 done
 
-if [[ "${STATUS:-}" != "exited:0" ]]; then
-  docker compose logs migrate >&2
-  echo "Timed out waiting for database migration/bootstrap; the web application was not started." >&2
+if [[ -z "${DB_CONTAINER:-}" ]] || [[ "$(docker inspect -f '{{.State.Health.Status}}' "$DB_CONTAINER" 2>/dev/null || true)" != "healthy" ]]; then
+  docker compose logs db >&2
+  echo "Timed out waiting for the database; the web application was not started." >&2
   exit 1
 fi
+
+echo "Running the current migration/bootstrap task (a new administrator password appears only if an account is created):"
+docker compose run --build --rm --no-deps migrate
+docker compose up -d --build --no-deps app
 
 echo "Docker installation complete. Verify with: curl http://127.0.0.1:${HOST_PORT:-3000}/api/health"
 echo "Place a TLS reverse proxy in front of the container before allowing production sign-in."

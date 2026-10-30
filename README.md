@@ -33,7 +33,7 @@ The health endpoint is `GET /api/health`.
 
 ## Hostinger and self-hosted deployment
 
-Deploy the `main` branch from the repository root on Hostinger Node.js Web App Hosting with Node 22, pnpm, build command `pnpm deploy:hostinger`, and entry file `dist/index.js`. The complete production variables, first-admin bootstrap, MFA, recurring-cron, GitHub update, native VPS, and Docker instructions are in [docs/HOSTINGER_DEPLOYMENT.md](docs/HOSTINGER_DEPLOYMENT.md). For a self-provisioning server, use the [one-command Ubuntu VPS installation guide](docs/VPS_INSTALLATION.md); the existing portable installer selector remains available as `./scripts/install.sh` after cloning the repository to a Linux host.
+Deploy the `main` branch from the repository root on Hostinger Node.js Web App Hosting with Node 22, pnpm, build command `pnpm deploy:hostinger`, and entry file `dist/index.js`. The complete production variables, first-admin bootstrap, MFA, recurring-cron, GitHub update, native VPS, and Docker instructions are in [docs/HOSTINGER_DEPLOYMENT.md](docs/HOSTINGER_DEPLOYMENT.md). For a self-provisioning server, use the [one-command Ubuntu VPS installation guide](docs/VPS_INSTALLATION.md): Native and Docker modes automatically provision persistent local MySQL by default, bind application traffic behind Nginx, and support a Cloudflare real-IP/origin-lock deployment. The existing portable installer selector remains available as `./scripts/install.sh` after cloning the repository to a Linux host.
 
 ## Before enabling live email
 
