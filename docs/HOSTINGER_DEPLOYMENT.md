@@ -44,6 +44,8 @@ In the deployment review page, open **Environment variables** and add the follow
 NODE_ENV=production
 APP_ORIGIN=https://invoices.example.com
 FORCE_SECURE_COOKIES=true
+# Set true when Hostinger is reached through Cloudflare or another trusted reverse proxy.
+TRUST_PROXY=true
 DATABASE_URL=mysql://DATABASE_USER:URL_ENCODED_DATABASE_PASSWORD@DATABASE_HOST:3306/DATABASE_NAME
 
 APP_CONFIG_ENCRYPTION_KEY=BASE64_OR_HEX_32_BYTE_KEY

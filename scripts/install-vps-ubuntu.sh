@@ -30,7 +30,7 @@ Options:
   --repository URL     Git repository URL to deploy.
   --skip-nginx         Do not install or configure the Nginx reverse proxy.
   --no-cloudflare-proxy  Do not configure Nginx to trust Cloudflare real-IP headers.
-  --lock-cloudflare-origin  Configure UFW to permit HTTP/HTTPS only from Cloudflare IP ranges (keeps OpenSSH allowed).
+  --lock-cloudflare-origin  Configure Nginx to permit HTTP/HTTPS only from Cloudflare IP ranges.
   -h, --help           Show this help.
 
 The installer asks for your HTTPS origin, private S3-compatible logo storage, and first
