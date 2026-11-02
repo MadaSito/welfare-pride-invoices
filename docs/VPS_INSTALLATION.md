@@ -126,6 +126,19 @@ sudo ./scripts/install-vps-ubuntu.sh --mode native
 
 It permits only a clean fast-forward update of the selected `main` branch, runs additive migrations, and never overwrites `.env` or resets the existing administrator.
 
+### Recovering an interrupted older installer
+
+If an older installer run stopped with `fatal: detected dubious ownership in repository at '/opt/welfare-pride-invoices'`, no database migration or administrator reset was performed. Download the current installer to a temporary path and re-run it; do **not** add a global Git `safe.directory` exception:
+
+```bash
+sudo curl -fsSL -o /tmp/welfare-pride-vps-installer.sh \
+  https://raw.githubusercontent.com/MadaSito/welfare-pride-invoices/main/scripts/install-vps-ubuntu.sh
+sudo chmod 700 /tmp/welfare-pride-vps-installer.sh
+sudo bash /tmp/welfare-pride-vps-installer.sh --mode native
+```
+
+The current installer repairs the application-tree ownership and performs Git operations as the non-root `welfarepride` service account. It preserves the existing `.env`, database, administrator password, and MFA state.
+
 ## Recurring invoices
 
 Create a protected cron job for each active schedule after HTTPS is working. Use the schedule key shown by the application and the saved `RECURRING_SCHEDULER_SECRET` from `/opt/welfare-pride-invoices/.env`:

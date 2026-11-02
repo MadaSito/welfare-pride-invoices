@@ -100,6 +100,10 @@ as_app_user() {
   runuser -u "$APP_USER" -- env HOME="$(getent passwd "$APP_USER" | cut -d: -f6)" bash -lc "$1"
 }
 
+git_as_app_user() {
+  runuser -u "$APP_USER" -- env HOME="$(getent passwd "$APP_USER" | cut -d: -f6)" git -C "$APP_DIRECTORY" "$@"
+}
+
 apt_install_basics() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
@@ -181,17 +185,20 @@ prepare_checkout() {
 
   if [[ -d "$APP_DIRECTORY/.git" ]]; then
     local active_branch
-    active_branch="$(git -C "$APP_DIRECTORY" branch --show-current)"
+    # An earlier successful run makes this tree application-owned. Repair an
+    # interrupted root-owned checkout, then run Git only as its owner.
+    chown -R "$APP_USER:$(id -gn "$APP_USER")" "$APP_DIRECTORY"
+    active_branch="$(git_as_app_user branch --show-current)"
     if [[ "$active_branch" != "$BRANCH" ]]; then
       echo "Existing checkout is on '${active_branch}', not '${BRANCH}'. Switch branches manually or choose --branch '${active_branch}'." >&2
       exit 1
     fi
-    if [[ -n "$(git -C "$APP_DIRECTORY" status --porcelain)" ]]; then
+    if [[ -n "$(git_as_app_user status --porcelain)" ]]; then
       echo "Existing checkout has local changes. The installer will not overwrite it." >&2
       exit 1
     fi
-    git -C "$APP_DIRECTORY" fetch origin "$BRANCH"
-    git -C "$APP_DIRECTORY" pull --ff-only origin "$BRANCH"
+    git_as_app_user fetch origin "$BRANCH"
+    git_as_app_user pull --ff-only origin "$BRANCH"
   elif [[ -e "$APP_DIRECTORY" ]]; then
     echo "${APP_DIRECTORY} exists but is not a Git checkout. Choose another --app-directory or remove it manually." >&2
     exit 1
