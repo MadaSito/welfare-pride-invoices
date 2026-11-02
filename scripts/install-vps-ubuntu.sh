@@ -158,11 +158,7 @@ install_local_mysql() {
       apt-get install -y default-mysql-server
     fi
   fi
-  if systemctl list-unit-files --type=service | grep -q '^mysql\.service'; then
-    systemctl enable --now mysql
-  else
-    systemctl enable --now mariadb
-  fi
+  systemctl enable --now mysql.service 2>/dev/null || systemctl enable --now mariadb.service
 }
 
 provision_local_mysql_database() {
