@@ -260,9 +260,8 @@ prompt_value() {
 }
 
 s3_template_is_unconfigured() {
-  needs_value "$(current_env_value S3_ENDPOINT)" && \
-  needs_value "$(current_env_value S3_BUCKET)" && \
-  needs_value "$(current_env_value S3_ACCESS_KEY_ID)" && \
+  needs_value "$(current_env_value S3_ENDPOINT)" || \
+  needs_value "$(current_env_value S3_ACCESS_KEY_ID)" || \
   needs_value "$(current_env_value S3_SECRET_ACCESS_KEY)"
 }
 
