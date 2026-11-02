@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import { storageGetSignedUrl } from "../storage";
+import { storageRead } from "../storage";
 
 const BLUE = "#5A92C9";
 const ORANGE = "#D58240";
@@ -85,9 +85,8 @@ function fontPath(name: string) {
 async function loadLogo(logoKey: string | null) {
   if (!logoKey) return null;
   try {
-    const signedUrl = await storageGetSignedUrl(logoKey);
-    const response = await fetch(signedUrl);
-    if (response.ok) return Buffer.from(await response.arrayBuffer());
+    const asset = await storageRead(logoKey);
+    if (asset) return asset.data;
   } catch {
     // Fall through to the bundled default only; tenant-uploaded assets never use a browser URL fallback.
   }

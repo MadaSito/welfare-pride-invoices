@@ -38,4 +38,4 @@ writeFileSync(path, text, { mode: 0o600 });
 console.log(changed.length ? `Generated values for: ${changed.join(", ")}` : "Deployment secrets were already configured; nothing was overwritten.");
 NODE
 
-echo "Next: set DATABASE_URL, APP_ORIGIN, and private S3-compatible storage values in .env before installing."
+echo "Next: set DATABASE_URL, APP_ORIGIN, and either protected local storage or private S3-compatible storage values in .env before installing."

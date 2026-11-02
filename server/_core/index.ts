@@ -9,7 +9,7 @@ import { registerInvoiceHttpRoutes, registerWebhookRoutes } from "../routes/invo
 import { registerRecurringInvoiceScheduledRoutes } from "../routes/recurringInvoiceRoutes";
 import { apiRateLimit, requestSecurity } from "../security/requestSecurity";
 import { registerStandaloneAuthRoutes } from "../auth/routes";
-import { storageGetSignedUrl } from "../storage";
+import { storageRead } from "../storage";
 import { registerBackupRoutes } from "../routes/backupRoutes";
 import { authenticateRequest } from "../auth/service";
 import { getCompanyAccess } from "../db";
@@ -20,7 +20,7 @@ async function startServer() {
   app.use(requestSecurity); app.use("/api", apiRateLimit); registerWebhookRoutes(app);
   app.use(express.json({ limit: "2mb" })); app.use(express.urlencoded({ limit: "2mb", extended: true }));
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
-  app.get("/api/assets/*", async (req, res) => { try { const key = String((req.params as Record<string, string>)["0"] ?? ""); const match = /^companies\/(\d+)\/logos\//.exec(key); const session = await authenticateRequest(req); if (!key || !match || !session || session.stage !== "full" || !(await getCompanyAccess(session.user, Number(match[1])))) return res.sendStatus(404); res.redirect(302, await storageGetSignedUrl(key)); } catch { res.sendStatus(404); } });
+  app.get("/api/assets/*", async (req, res) => { try { const key = String((req.params as Record<string, string>)["0"] ?? ""); const match = /^companies\/(\d+)\/logos\//.exec(key); const session = await authenticateRequest(req); if (!key || !match || !session || session.stage !== "full" || !(await getCompanyAccess(session.user, Number(match[1])))) return res.sendStatus(404); const asset = await storageRead(key); if (!asset) return res.sendStatus(404); res.set({ "Cache-Control": "private, no-store", "Content-Type": asset.contentType }); res.send(asset.data); } catch { res.sendStatus(404); } });
   registerStandaloneAuthRoutes(app); registerInvoiceHttpRoutes(app); registerRecurringInvoiceScheduledRoutes(app); registerBackupRoutes(app);
   app.use("/api/trpc", createExpressMiddleware({ router: appRouter, createContext }));
   if (process.env.NODE_ENV === "development") await setupVite(app, server); else serveStatic(app);

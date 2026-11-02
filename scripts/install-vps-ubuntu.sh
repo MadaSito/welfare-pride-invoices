@@ -12,6 +12,8 @@ APP_USER="${APP_USER:-welfarepride}"
 MODE="native"
 DATABASE_MODE="local"
 DATABASE_MODE_EXPLICIT=0
+STORAGE_MODE="s3"
+STORAGE_MODE_EXPLICIT=0
 SKIP_NGINX=0
 CLOUDFLARE_PROXY=1
 LOCK_CLOUDFLARE_ORIGIN=0
@@ -24,6 +26,7 @@ Usage: sudo bash scripts/install-vps-ubuntu.sh [--mode native|docker] [options]
 Options:
   --mode native|docker  Native Node.js 22 + systemd (default), or Docker Compose + MySQL.
   --database local|external  Native mode database source: provision local MySQL (default) or use an existing external MySQL URL.
+  --storage local|s3  Protected local-disk logo storage for Native mode, or S3-compatible storage (default).
   --app-directory PATH Installation directory (default: /opt/welfare-pride-invoices).
   --app-user NAME      Non-root service account (default: welfarepride).
   --branch NAME        Repository branch to deploy (default: main).
@@ -37,7 +40,8 @@ The installer asks for your HTTPS origin, private S3-compatible logo storage, an
 administrator email. Native mode provisions a local MySQL server by default; use
 --database external to supply an external MySQL DATABASE_URL. It generates missing encryption,
 webhook, scheduler, and database secrets locally. The initial local administrator password is
-generated and shown only when the account is first created.
+generated and shown only when the account is first created. Use --storage local to defer
+S3-compatible logo storage setup on a Native VPS.
 EOF
 }
 
@@ -45,6 +49,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) MODE="${2:-}"; shift 2 ;;
     --database) DATABASE_MODE="${2:-}"; DATABASE_MODE_EXPLICIT=1; shift 2 ;;
+    --storage) STORAGE_MODE="${2:-}"; STORAGE_MODE_EXPLICIT=1; shift 2 ;;
     --app-directory) APP_DIRECTORY="${2:-}"; shift 2 ;;
     --app-user) APP_USER="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
@@ -63,8 +68,14 @@ fi
 if [[ "$DATABASE_MODE" != "local" && "$DATABASE_MODE" != "external" ]]; then
   echo "--database must be local or external." >&2; exit 2
 fi
+if [[ "$STORAGE_MODE" != "local" && "$STORAGE_MODE" != "s3" ]]; then
+  echo "--storage must be local or s3." >&2; exit 2
+fi
 if [[ "$MODE" == "docker" && "$DATABASE_MODE" == "external" ]]; then
   echo "Docker mode always provisions its persistent local MySQL container; omit --database external." >&2; exit 2
+fi
+if [[ "$MODE" == "docker" && "$STORAGE_MODE" == "local" ]]; then
+  echo "Docker mode currently requires S3-compatible storage; use Native mode for protected local-disk storage." >&2; exit 2
 fi
 if [[ "$LOCK_CLOUDFLARE_ORIGIN" == "1" && "$SKIP_NGINX" == "1" ]]; then
   echo "--lock-cloudflare-origin requires the managed Nginx proxy; omit --skip-nginx." >&2; exit 2
@@ -75,7 +86,7 @@ fi
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Re-running through sudo so packages, service files, and Nginx can be configured."
-  sudo_args=(bash "$0" --mode "$MODE" --database "$DATABASE_MODE" --app-directory "$APP_DIRECTORY" --app-user "$APP_USER" --branch "$BRANCH" --repository "$REPOSITORY_URL")
+  sudo_args=(bash "$0" --mode "$MODE" --database "$DATABASE_MODE" --storage "$STORAGE_MODE" --app-directory "$APP_DIRECTORY" --app-user "$APP_USER" --branch "$BRANCH" --repository "$REPOSITORY_URL")
   [[ "$SKIP_NGINX" == "1" ]] && sudo_args+=(--skip-nginx)
   [[ "$CLOUDFLARE_PROXY" == "0" ]] && sudo_args+=(--no-cloudflare-proxy)
   [[ "$LOCK_CLOUDFLARE_ORIGIN_EXPLICIT" == "1" ]] && sudo_args+=(--lock-cloudflare-origin)
@@ -248,8 +259,15 @@ prompt_value() {
   set_env_value "$key" "$value"
 }
 
+s3_template_is_unconfigured() {
+  needs_value "$(current_env_value S3_ENDPOINT)" && \
+  needs_value "$(current_env_value S3_BUCKET)" && \
+  needs_value "$(current_env_value S3_ACCESS_KEY_ID)" && \
+  needs_value "$(current_env_value S3_SECRET_ACCESS_KEY)"
+}
+
 resolve_persisted_deployment_options() {
-  local stored_database_mode stored_origin_lock
+  local stored_database_mode stored_storage_mode stored_origin_lock
   stored_database_mode="$(current_env_value DATABASE_MODE)"
   if [[ "$stored_database_mode" == "local" || "$stored_database_mode" == "external" ]]; then
     if [[ "$DATABASE_MODE_EXPLICIT" == "1" && "$DATABASE_MODE" != "$stored_database_mode" ]]; then
@@ -261,6 +279,21 @@ resolve_persisted_deployment_options() {
   fi
   if [[ "$MODE" == "docker" && "$DATABASE_MODE" == "external" ]]; then
     echo "This installation records DATABASE_MODE=external and cannot be converted to Docker's local database automatically." >&2
+    exit 1
+  fi
+  stored_storage_mode="$(current_env_value STORAGE_DRIVER)"
+  if [[ "$stored_storage_mode" == "local" || "$stored_storage_mode" == "s3" ]]; then
+    if [[ "$STORAGE_MODE_EXPLICIT" == "1" && "$STORAGE_MODE" != "$stored_storage_mode" ]]; then
+      if [[ "$stored_storage_mode" != "s3" ]] || ! s3_template_is_unconfigured; then
+        echo "This installation already uses configured STORAGE_DRIVER=${stored_storage_mode}. The bootstrap refuses to switch storage drivers automatically." >&2
+        echo "Perform a separately reviewed asset migration and update .env deliberately before changing storage modes." >&2
+        exit 1
+      fi
+    fi
+    if [[ "$STORAGE_MODE_EXPLICIT" == "0" || "$STORAGE_MODE" == "$stored_storage_mode" ]]; then STORAGE_MODE="$stored_storage_mode"; fi
+  fi
+  if [[ "$MODE" == "docker" && "$STORAGE_MODE" == "local" ]]; then
+    echo "This installation records protected local storage and cannot be converted to Docker automatically." >&2
     exit 1
   fi
   stored_origin_lock="$(current_env_value CLOUDFLARE_ORIGIN_LOCKED)"
@@ -290,11 +323,17 @@ configure_environment() {
     prompt_value DATABASE_URL "External MySQL DATABASE_URL" "" 1
   fi
 
-  prompt_value S3_ENDPOINT "Private S3-compatible endpoint, for example https://s3.us-east-1.amazonaws.com"
-  prompt_value S3_REGION "S3 region" "us-east-1"
-  prompt_value S3_BUCKET "Private S3 bucket name"
-  prompt_value S3_ACCESS_KEY_ID "S3 access key ID" "" 1
-  prompt_value S3_SECRET_ACCESS_KEY "S3 secret access key" "" 1
+  if [[ "$STORAGE_MODE" == "local" ]]; then
+    set_env_value STORAGE_DRIVER local
+    set_env_value LOCAL_STORAGE_PATH "/var/lib/${APP_USER}/storage"
+  else
+    set_env_value STORAGE_DRIVER s3
+    prompt_value S3_ENDPOINT "Private S3-compatible endpoint, for example https://s3.us-east-1.amazonaws.com"
+    prompt_value S3_REGION "S3 region" "us-east-1"
+    prompt_value S3_BUCKET "Private S3 bucket name"
+    prompt_value S3_ACCESS_KEY_ID "S3 access key ID" "" 1
+    prompt_value S3_SECRET_ACCESS_KEY "S3 secret access key" "" 1
+  fi
   prompt_value BOOTSTRAP_ADMIN_EMAIL "Initial local administrator email" "admin@welfarepride.local"
   set_env_value FORCE_SECURE_COOKIES true
   set_env_value TRUST_PROXY true
@@ -304,6 +343,17 @@ configure_environment() {
   if [[ "$MODE" == "native" ]]; then set_env_value BIND_HOST 127.0.0.1; else set_env_value BIND_HOST 0.0.0.0; fi
   chmod 600 "$APP_DIRECTORY/.env"
   chown "$APP_USER:$APP_USER" "$APP_DIRECTORY/.env"
+}
+
+prepare_local_storage() {
+  [[ "$(current_env_value STORAGE_DRIVER)" == "local" ]] || return
+  local storage_path group
+  storage_path="$(current_env_value LOCAL_STORAGE_PATH)"
+  group="$(id -gn "$APP_USER")"
+  if [[ "$storage_path" != /* ]]; then
+    echo "LOCAL_STORAGE_PATH must be an absolute path." >&2; exit 1
+  fi
+  install -d -m 700 -o "$APP_USER" -g "$group" "$storage_path"
 }
 
 install_native_application() {
@@ -424,6 +474,7 @@ if [[ "$MODE" == "native" ]]; then
     install_local_mysql
     provision_local_mysql_database
   fi
+  prepare_local_storage
   install_native_application
 else
   install_docker_application

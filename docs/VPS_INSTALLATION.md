@@ -15,6 +15,7 @@ Prepare these values:
 - A private S3-compatible bucket plus endpoint, region, access key, and secret for company logos.
 - No database credential is required for the default **Native** or **Docker** path: both provision a persistent local MySQL-compatible database and generate its application credentials locally.
 - Use `--database external` only when **Native** mode should use an existing remote MySQL-compatible database; the installer then prompts for its `DATABASE_URL`.
+- Use `--storage local` with **Native** mode to store company logos in the protected VPS directory `/var/lib/welfarepride/storage` rather than supplying S3 credentials. Include this directory in your server backups before later moving to S3-compatible storage; the installer deliberately does not auto-migrate stored logo assets between drivers.
 
 The installer asks for these values interactively. It never prints entered database or object-storage credentials.
 
@@ -27,6 +28,12 @@ sudo apt-get update && sudo apt-get install -y git
 sudo git clone https://github.com/MadaSito/welfare-pride-invoices.git /opt/welfare-pride-invoices
 cd /opt/welfare-pride-invoices
 sudo ./scripts/install-vps-ubuntu.sh --mode native
+```
+
+To defer S3 setup and use protected local VPS storage for company logos, run:
+
+```bash
+sudo ./scripts/install-vps-ubuntu.sh --mode native --storage local
 ```
 
 For Docker with the bundled persistent MySQL database, replace `native` with `docker`:

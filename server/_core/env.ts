@@ -7,6 +7,8 @@ export const ENV = {
   get entraClientId() { return process.env.ENTRA_CLIENT_ID ?? ""; },
   get entraClientSecret() { return process.env.ENTRA_CLIENT_SECRET ?? ""; },
   get schedulerSecret() { return process.env.RECURRING_SCHEDULER_SECRET ?? ""; },
+  get storageDriver() { return process.env.STORAGE_DRIVER === "local" ? "local" : "s3"; },
+  get localStoragePath() { return process.env.LOCAL_STORAGE_PATH ?? ""; },
   get s3Endpoint() { return process.env.S3_ENDPOINT ?? ""; },
   get s3Region() { return process.env.S3_REGION ?? "us-east-1"; },
   get s3Bucket() { return process.env.S3_BUCKET ?? ""; },
