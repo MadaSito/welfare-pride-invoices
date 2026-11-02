@@ -358,7 +358,9 @@ prepare_local_storage() {
 }
 
 install_native_application() {
-  as_app_user "cd '$APP_DIRECTORY' && corepack enable && corepack prepare pnpm@10.18.0 --activate && pnpm install --frozen-lockfile && pnpm build && pnpm db:migrate && pnpm bootstrap:admin"
+  corepack enable
+  corepack prepare pnpm@10.18.0 --activate
+  as_app_user "cd '$APP_DIRECTORY' && pnpm install --frozen-lockfile && pnpm build && pnpm db:migrate && pnpm bootstrap:admin"
   local node_bin run_group
   node_bin="$(command -v node)"
   run_group="$(id -gn "$APP_USER")"
